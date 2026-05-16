@@ -12,6 +12,13 @@ Type=oneshot
 Environment="MESH_NIGHTLY_CORPUS=%h/Source/slancha-test/corpus/v1/combined70_classified.jsonl"
 Environment="MESH_REGISTRY_URL=http://127.0.0.1:8088"
 
+# slancha-mesh is typically dev-installed from source rather than pip-published.
+# WorkingDirectory + PYTHONPATH point at the source checkout so `python3 -m
+# mesh.scripts.nightly_smoke` resolves the module. Override via
+# `systemctl --user edit` if the checkout lives elsewhere.
+WorkingDirectory=%h/Source/slancha-mesh
+Environment="PYTHONPATH=%h/Source/slancha-mesh"
+
 # `--token ${MESH_NODE_TOKEN}` would be added here if SLANCHA_NODE_TOKEN is set
 # in the unit's drop-in. By default the mesh service runs in dev-mode (no auth).
 ExecStart=/usr/bin/env python3 -m mesh.scripts.nightly_smoke \
@@ -23,7 +30,10 @@ ExecStart=/usr/bin/env python3 -m mesh.scripts.nightly_smoke \
 # scratch-file collisions with concurrent units.
 PrivateTmp=true
 ProtectSystem=full
-ProtectHome=read-only
+# ProtectHome=read-only would block importing from %h/Source/slancha-mesh.
+# tmpfs gives a private view + explicit BindReadOnlyPaths for the checkout.
+ProtectHome=tmpfs
+BindReadOnlyPaths=%h/Source/slancha-mesh
 NoNewPrivileges=true
 
 # Don't restart on failure — the timer will fire again tomorrow. A persistent

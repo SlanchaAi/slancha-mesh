@@ -52,6 +52,28 @@ for unit in mesh-nightly-smoke.service mesh-nightly-smoke.timer; do
     echo "installed: $dst"
 done
 
+# Pre-flight: the .service expects the corpus at %E/slancha-mesh/corpus.jsonl
+# (resolves to $XDG_CONFIG_HOME/slancha-mesh/corpus.jsonl, default ~/.config).
+# If it's missing, generate it from a default slancha-test corpus path if one
+# exists; otherwise leave a placeholder + tell the operator to drop one in.
+CORPUS_DST="${XDG_CONFIG_HOME:-$HOME/.config}/slancha-mesh/corpus.jsonl"
+DEFAULT_CORPUS_SRC="$HOME/Source/slancha-test/corpus/v1/combined70.jsonl"
+mkdir -p "$(dirname "$CORPUS_DST")"
+if [[ ! -f "$CORPUS_DST" ]]; then
+    if [[ -f "$DEFAULT_CORPUS_SRC" ]]; then
+        echo "pre-classifying $DEFAULT_CORPUS_SRC → $CORPUS_DST"
+        (
+            cd "$HOME/Source/slancha-mesh" && \
+            PYTHONPATH="$HOME/Source/slancha-mesh" \
+                python3 -m mesh.scripts.preclassify_corpus \
+                    --in "$DEFAULT_CORPUS_SRC" --out "$CORPUS_DST"
+        ) || echo "warn: preclassify failed; nightly run will fail until $CORPUS_DST is provided" >&2
+    else
+        echo "warn: corpus missing at $CORPUS_DST and no default at $DEFAULT_CORPUS_SRC" >&2
+        echo "      nightly run will fail until corpus is provided." >&2
+    fi
+fi
+
 systemctl --user daemon-reload
 systemctl --user enable --now mesh-nightly-smoke.timer
 
