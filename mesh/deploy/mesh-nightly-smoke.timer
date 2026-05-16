@@ -1,0 +1,19 @@
+[Unit]
+Description=Run slancha-mesh nightly smoke at 03:00 UTC daily
+Documentation=https://github.com/SlanchaAi/slancha-mesh/blob/main/docs/SLANCHA_MESH_V0_SPEC.md
+
+[Timer]
+# 03:00 UTC every day — chosen as a low-traffic window for the mesh host,
+# and well after any v0.0.4 idle-fine-tune windows that might be running.
+OnCalendar=*-*-* 03:00:00 UTC
+
+# Catch up if the host was asleep / off when the scheduled time passed.
+Persistent=true
+
+# Stagger by up to 5 min so multiple hosts don't all fire at exactly 03:00.
+RandomizedDelaySec=300
+
+Unit=mesh-nightly-smoke.service
+
+[Install]
+WantedBy=timers.target

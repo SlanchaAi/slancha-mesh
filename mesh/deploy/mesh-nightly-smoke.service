@@ -1,0 +1,34 @@
+[Unit]
+Description=Slancha-Mesh nightly replay smoke
+Documentation=https://github.com/SlanchaAi/slancha-mesh/blob/main/docs/SLANCHA_MESH_V0_SPEC.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Defaults targeted at the Spark host layout — override via systemctl edit.
+# MESH_NIGHTLY_CORPUS is the pre-classified corpus (see preclassify_corpus.py).
+Environment="MESH_NIGHTLY_CORPUS=%h/Source/slancha-test/corpus/v1/combined70_classified.jsonl"
+Environment="MESH_REGISTRY_URL=http://127.0.0.1:8088"
+
+# `--token ${MESH_NODE_TOKEN}` would be added here if SLANCHA_NODE_TOKEN is set
+# in the unit's drop-in. By default the mesh service runs in dev-mode (no auth).
+ExecStart=/usr/bin/env python3 -m mesh.scripts.nightly_smoke \
+    --corpus  %E/slancha-mesh/corpus.jsonl \
+    --history-dir %S/slancha-mesh/replay-history \
+    --registry-url ${MESH_REGISTRY_URL}
+
+# Drop privileges + sandbox a bit. PrivateTmp is cheap and prevents
+# scratch-file collisions with concurrent units.
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=true
+
+# Don't restart on failure — the timer will fire again tomorrow. A persistent
+# alert log accumulates in %S/slancha-mesh/replay-history/alerts.jsonl.
+Restart=no
+
+[Install]
+WantedBy=default.target
