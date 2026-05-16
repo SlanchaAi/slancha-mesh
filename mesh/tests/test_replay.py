@@ -213,6 +213,90 @@ def test_replay_corpus_snapshot_refresh(tmp_path, monkeypatch, spark_node, catal
 # ---------------------------------------------------------------------------
 
 
+def test_render_summary_markdown_basic(tmp_path):
+    from mesh.scripts.mesh_replay import render_summary_markdown
+
+    p = tmp_path / "replay.jsonl"
+    p.write_text(
+        '\n'.join([
+            json.dumps({
+                "prompt_id": "p1",
+                "prompt_hash": None,
+                "signals": {"domain": "code", "difficulty": "medium"},
+                "decision": {
+                    "chosen_specialist": "coder", "chosen_node": "n1",
+                    "node_url": None, "model": "coder", "reason": "x",
+                    "queue_ms": 100, "fallback_chain": [["coder", "n1"]],
+                    "mesh_hit": True, "vs_cloud_baseline_cost": 0.0,
+                },
+                "snapshot_ts": "2026-05-16T12:00:00+00:00",
+            }),
+            json.dumps({
+                "prompt_id": "p2",
+                "prompt_hash": None,
+                "signals": {"domain": "math", "difficulty": "hard"},
+                "decision": {
+                    "chosen_specialist": None, "chosen_node": None,
+                    "node_url": None, "model": "claude", "reason": "no route",
+                    "queue_ms": 0, "fallback_chain": [["claude", None]],
+                    "mesh_hit": False, "vs_cloud_baseline_cost": 0.0,
+                },
+                "snapshot_ts": "2026-05-16T12:00:00+00:00",
+            }),
+        ])
+    )
+    md = render_summary_markdown(p)
+    assert md.startswith("# Mesh Replay Summary")
+    assert "2 decisions" in md
+    assert "Mesh hits" in md
+    assert "1 / 2" in md
+    assert "Top Fallback Chain Shapes" in md
+    assert "Per-Specialist Invocations" in md
+    # Headers for both specialists + cloud row
+    assert "coder" in md
+    assert "cloud" in md
+
+
+def test_render_summary_markdown_empty_jsonl(tmp_path):
+    from mesh.scripts.mesh_replay import render_summary_markdown
+
+    p = tmp_path / "empty.jsonl"
+    p.write_text("")
+    md = render_summary_markdown(p)
+    assert "0 decisions" in md
+    # Empty stats but the header section still present
+    assert "Top Stats" in md
+
+
+def test_replay_corpus_writes_summary_md_when_path_given(
+    tmp_path, monkeypatch, spark_node, catalog, fresh_now
+):
+    from mesh.scripts.mesh_replay import replay_corpus
+
+    reg = MeshRegistry(catalog=catalog)
+    hb = make_heartbeat(spark_node, fresh_now, ["qwen3-coder-30b-a3b-fp8"], catalog)
+    reg.record_heartbeat(HeartbeatPostRequest(heartbeat=hb, node_url="http://spark:8001/v1"))
+    snap = reg.snapshot(now=fresh_now)
+    monkeypatch.setattr("mesh.scripts.mesh_replay.fetch_snapshot", lambda *a, **k: snap)
+
+    corpus = tmp_path / "corpus.jsonl"
+    corpus.write_text(json.dumps({
+        "prompt_id": "p1",
+        "signals": {"domain": "code", "difficulty": "medium"},
+    }) + "\n")
+    out = tmp_path / "out.jsonl"
+    summary = tmp_path / "summary.md"
+
+    replay_corpus(
+        corpus_path=corpus, output_path=out, base_url="http://stub",
+        summary_md_path=summary,
+    )
+    assert summary.exists()
+    md = summary.read_text()
+    assert "# Mesh Replay Summary" in md
+    assert "1 decisions" in md
+
+
 def test_smoke_five_prompts_in_under_one_second(
     tmp_path, monkeypatch, spark_node, mac_mini_node, catalog, fresh_now
 ):
