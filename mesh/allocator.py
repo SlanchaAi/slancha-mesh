@@ -30,6 +30,12 @@ TIER_1_DOMAINS: frozenset[str] = frozenset({"math", "code", "general", "reasonin
 TIER_2_DOMAINS: frozenset[str] = frozenset({"multilingual", "tool_use", "summarization"})
 TIER_3_DOMAINS: frozenset[str] = frozenset({"vision", "embeddings", "image_gen", "whisper"})
 
+# Max primary-memory share before _fill_secondaries refuses to attach
+# a coexisting specialist. Tuned conservatively to 0.5 (50%) so a
+# secondary always has at least primary-equivalent headroom available.
+# Above this ceiling, coexistence risks OOM under load — keep one spec.
+SECONDARY_PRIMARY_SHARE_CEILING: float = 0.5
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -418,8 +424,8 @@ def _fill_secondaries(
         if eff_mem <= 0:
             continue
         primary_share = sugg.primary.runtime_gb / eff_mem
-        if primary_share > 0.5:
-            # Primary already takes >50% of memory; coexistence risks OOM.
+        if primary_share > SECONDARY_PRIMARY_SHARE_CEILING:
+            # Primary already takes >ceiling of memory; coexistence risks OOM.
             continue
         remaining_mem = eff_mem - sugg.primary.runtime_gb
         # Candidate domains: tier-1 + tier-2 not yet covered (anywhere).
