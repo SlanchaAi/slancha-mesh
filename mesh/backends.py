@@ -73,6 +73,32 @@ class BaseBackend(Protocol):
 # ---------------------------------------------------------------------------
 
 
+# Blackwell consumer/Spark cuda_capability strings that need the Marlin
+# FP8 fallback (no native `cutlass_scaled_mm` FP8 kernel in vLLM 0.17).
+# Centralized so `_needs_fp8_marlin_fallback` stays testable in isolation
+# from VLLMBackend.start().
+_BLACKWELL_FP8_FALLBACK_CAPS = frozenset({"12.0", "12.1"})
+
+
+def _needs_fp8_marlin_fallback(cuda_capability: str | None) -> bool:
+    """Return True iff this chip needs `VLLM_TEST_FORCE_FP8_MARLIN=1`.
+
+    Hopper (9.0) and Ada (8.9) have native cutlass FP8 kernels and run
+    faster without the fallback. Blackwell consumer (sm_120/sm_121) ships
+    no cutlass FP8 GEMM in vLLM 0.17 + torch 2.10, so the Marlin
+    weight-only fallback is the only path that loads weights.
+
+    Unknown / missing cuda_capability → do NOT force the flag. Lets a
+    non-CUDA host (CPU vLLM build, or a future Ada/Hopper that doesn't
+    report capability through our probe) use the native path. Setting
+    the flag on a chip with native FP8 actively hurts perf (BF16 dequant
+    each matmul), so the default-off posture is safer than default-on.
+    """
+    if cuda_capability is None:
+        return False
+    return cuda_capability in _BLACKWELL_FP8_FALLBACK_CAPS
+
+
 @dataclass
 class VLLMBackend:
     """vLLM serve subprocess. OpenAI-compatible on `base_url`/v1.
@@ -90,6 +116,10 @@ class VLLMBackend:
     enforce_eager: bool = True
     log_path: Path | None = None
     extra_args: list[str] = field(default_factory=list)
+    # cuda_capability is threaded in from NodeProbe so backend chooses the
+    # right FP8 kernel path per-chip. None → conservative: assume native
+    # FP8 works and only flip to Marlin if explicitly known-Blackwell.
+    cuda_capability: str | None = None
 
     name: str = "vllm"
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
@@ -146,14 +176,16 @@ class VLLMBackend:
 
         env = os.environ.copy()
         env.setdefault("VLLM_LOGGING_LEVEL", "INFO")
-        # GB10 sm_121: torch 2.10 only knows up to sm_120; this nudge keeps
-        # the JIT happy without forcing a recompile.
-        env.setdefault("TORCH_CUDA_ARCH_LIST", "12.0")
-        # Blackwell consumer (sm_121) has no `cutlass_scaled_mm` FP8 kernel
-        # in vLLM 0.17 + torch 2.10. Marlin's weight-only FP8 path bypasses
-        # it by dequantizing on the fly. The flag is named `_TEST_` but is
-        # the documented workaround. See docs/MESH_V002_BUILD_2026_05_16.md.
-        env.setdefault("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+        # GB10 sm_121: torch 2.10 only knows up to sm_120; nudge JIT only
+        # when we're actually on Blackwell. Hopper/Ada don't need this.
+        if _needs_fp8_marlin_fallback(self.cuda_capability):
+            env.setdefault("TORCH_CUDA_ARCH_LIST", "12.0")
+            # Blackwell consumer (sm_120/sm_121) has no `cutlass_scaled_mm`
+            # FP8 kernel in vLLM 0.17 + torch 2.10. Marlin's weight-only
+            # FP8 path bypasses it by dequantizing on the fly. The flag is
+            # named `_TEST_` but is the documented workaround.
+            # See docs/MESH_V002_BUILD_2026_05_16.md.
+            env.setdefault("VLLM_TEST_FORCE_FP8_MARLIN", "1")
 
         log = open(self.log_path, "ab") if self.log_path else subprocess.DEVNULL
         self._proc = subprocess.Popen(

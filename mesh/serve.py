@@ -192,15 +192,31 @@ class ServeDaemon:
 # ---------------------------------------------------------------------------
 
 
-def build_backend(card: SpecialistCard, port: int, log_dir: Path | None = None) -> BaseBackend:
-    """Pick a backend implementation from the card's `required_backend`."""
+def build_backend(
+    card: SpecialistCard,
+    port: int,
+    log_dir: Path | None = None,
+    cuda_capability: str | None = None,
+) -> BaseBackend:
+    """Pick a backend implementation from the card's `required_backend`.
+
+    `cuda_capability` is threaded in from NodeProbe so vLLM can pick the
+    right FP8 kernel path per-chip. Blackwell consumer (sm_120/sm_121)
+    needs the Marlin weight-only FP8 fallback; Hopper/Ada don't. None →
+    conservative (no Marlin force, use native path).
+    """
     log_path = None
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{card.specialist_id}.log"
 
     if card.required_backend == "vllm":
-        return VLLMBackend(card=card, port=port, log_path=log_path)
+        return VLLMBackend(
+            card=card,
+            port=port,
+            log_path=log_path,
+            cuda_capability=cuda_capability,
+        )
     if card.required_backend in ("llamacpp", "ollama", "mlx"):
         # v0.0.2 ships vLLM only; non-vllm cards return NullBackend so the
         # daemon doesn't crash on a mixed-backend catalog. Real llamacpp
@@ -233,14 +249,21 @@ def build_daemon(
     if missing:
         raise KeyError(f"unknown specialist_id(s): {missing}")
 
+    if probe is None:
+        probe = probe_node()
+
     backends: list[BaseBackend] = []
     port = base_port
     for card in selected:
-        backends.append(build_backend(card, port=port, log_dir=log_dir))
+        backends.append(
+            build_backend(
+                card,
+                port=port,
+                log_dir=log_dir,
+                cuda_capability=probe.cuda_capability,
+            )
+        )
         port += 1
-
-    if probe is None:
-        probe = probe_node()
 
     return ServeDaemon(backends=backends, probe=probe, registry=registry, log_path=log_dir / "serve.log" if log_dir else None)
 
