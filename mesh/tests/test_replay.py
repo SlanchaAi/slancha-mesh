@@ -206,3 +206,86 @@ def test_replay_corpus_snapshot_refresh(tmp_path, monkeypatch, spark_node, catal
     # With refresh_every=3, processed=0,1,2,3,4 → fetches at 0, 3 (processed % 3 == 0)
     # Initial None → fetch (processed=0). Then processed=3 triggers fetch again.
     assert fetch_count["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# CI smoke — 5-prompt run representative of the live corpus shapes
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_five_prompts_in_under_one_second(
+    tmp_path, monkeypatch, spark_node, mac_mini_node, catalog, fresh_now
+):
+    """5-prompt CI smoke: simulates the spark-side workflow end-to-end.
+
+    Corpus mirrors the shape spark's preclassify_corpus.py emits — id
+    prefixes (math500, mbpp, gsm8k, hellaswag, mmlu) with corresponding
+    signals. Registry has both spark (code) and mac-mini (math) loaded.
+    Asserts decision shape + total wall under 1s (CI cost-cap).
+    """
+    import time
+
+    reg = MeshRegistry(catalog=catalog)
+    reg.record_heartbeat(
+        HeartbeatPostRequest(
+            heartbeat=make_heartbeat(spark_node, fresh_now, ["qwen3-coder-30b-a3b-fp8"], catalog),
+            node_url="http://spark:8001/v1",
+        )
+    )
+    reg.record_heartbeat(
+        HeartbeatPostRequest(
+            heartbeat=make_heartbeat(mac_mini_node, fresh_now, ["qwen3-math-7b-q4"], catalog),
+            node_url="http://mac-mini:8001/v1",
+        )
+    )
+    snap = reg.snapshot(now=fresh_now)
+
+    monkeypatch.setattr(
+        "mesh.scripts.mesh_replay.fetch_snapshot",
+        lambda *a, **k: snap,
+    )
+
+    corpus_path = tmp_path / "smoke.jsonl"
+    _write_corpus(corpus_path, [
+        {"prompt_id": "math500-001", "signals": {"domain": "math", "difficulty": "hard"}},
+        {"prompt_id": "mbpp-042",    "signals": {"domain": "code", "difficulty": "medium"}},
+        {"prompt_id": "gsm8k-100",   "signals": {"domain": "math", "difficulty": "easy"}},
+        {"prompt_id": "hellaswag-7", "signals": {"domain": "general", "difficulty": "easy"}},
+        {"prompt_id": "mmlu-cs-3",   "signals": {"domain": "code", "difficulty": "hard"}},
+    ])
+    output_path = tmp_path / "smoke_out.jsonl"
+
+    t0 = time.time()
+    counters = replay_corpus(
+        corpus_path=corpus_path,
+        output_path=output_path,
+        base_url="http://stub",
+    )
+    elapsed = time.time() - t0
+
+    assert counters["processed"] == 5
+    assert elapsed < 1.0, f"smoke run too slow: {elapsed:.3f}s (CI threshold = 1.0s)"
+
+    decisions = [json.loads(line) for line in output_path.read_text().splitlines() if line.strip()]
+    assert len(decisions) == 5
+
+    # Every decision has the contract fields
+    for d in decisions:
+        assert "prompt_id" in d
+        assert "decision" in d
+        dec = d["decision"]
+        for field in ("chosen_specialist", "chosen_node", "node_url", "model",
+                      "reason", "queue_ms", "fallback_chain", "mesh_hit",
+                      "vs_cloud_baseline_cost"):
+            assert field in dec, f"decision missing field {field!r}: {dec}"
+        # mesh_hit is a bool, not None
+        assert isinstance(dec["mesh_hit"], bool)
+        # fallback_chain is a list of [model_id, node_id|None] pairs
+        assert isinstance(dec["fallback_chain"], list)
+
+    # Sanity: math-domain prompts should route to mac-mini (math specialist),
+    # code-domain to spark (code specialist). Both nodes were heartbeated.
+    by_id = {d["prompt_id"]: d for d in decisions}
+    assert by_id["math500-001"]["decision"]["chosen_node"] == mac_mini_node.node_id
+    assert by_id["mbpp-042"]["decision"]["chosen_node"] == spark_node.node_id
+    assert by_id["mmlu-cs-3"]["decision"]["chosen_node"] == spark_node.node_id
