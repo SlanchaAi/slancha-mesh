@@ -32,11 +32,12 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import subprocess
 import sys
-from collections import Counter
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,22 @@ from mesh.dashboard.panels import (
 )
 
 DEFAULT_ALERT_THRESHOLD_PCT = 10.0
+# Per-domain hit-rate drift uses the SAME threshold as aggregate by default.
+# Override via run_nightly_smoke(per_domain_alert_threshold_pct=...) when a
+# noisy single-domain workload should be tolerated.
+DEFAULT_PER_DOMAIN_THRESHOLD_PCT = 10.0
+# KL divergence over the fallback-chain shape distribution. Empirically
+# stable distributions sit < 0.1 even with mild noise; > 0.3 indicates a
+# real shape shift (new chain shapes appearing, large redistribution).
+# Laplace smoothing constant keeps zero-prob shapes from blowing the
+# logarithm to infinity.
+DEFAULT_KL_THRESHOLD = 0.3
+_KL_SMOOTHING = 0.5
+# Per-domain drift signals require a minimum sample size in BOTH today's
+# and prior's slice for the domain. Below this, the domain's hit-rate is
+# too noisy to alarm on — we note it in `per_domain_drift` but skip the
+# alert. Tunable per deployment.
+PER_DOMAIN_MIN_SAMPLES = 5
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +79,17 @@ class DriftReport:
     `alert=True` indicates the run should fire an operator-visible alert.
     `reasons` is a list of human-readable strings explaining each
     contributing signal.
+
+    Beyond the aggregate hit-rate signal, the report carries two finer
+    drift readouts (added in M2):
+    - `per_domain_drift`: {domain: signed-Δpp} for every domain present
+      in either run. Domains with <PER_DOMAIN_MIN_SAMPLES samples in
+      either run are still reported but do NOT trigger alerts (noise
+      floor protection).
+    - `fallback_shape_kl`: KL(today || prior) over the fallback-chain
+      shape distribution. > DEFAULT_KL_THRESHOLD signals a redistribution
+      of WHERE traffic falls back to cloud (e.g., a specialist died →
+      its cloud-fallback shape now dominates).
     """
 
     alert: bool
@@ -70,6 +98,8 @@ class DriftReport:
     delta_hit_rate_pct: float
     new_fallback_domains: list[str]
     reasons: list[str]
+    per_domain_drift: dict[str, float] = field(default_factory=dict)
+    fallback_shape_kl: float = 0.0
 
 
 def _fallback_domains(records: list[DecisionRecord]) -> set[str]:
@@ -82,25 +112,114 @@ def _fallback_domains(records: list[DecisionRecord]) -> set[str]:
     return out
 
 
+def _per_domain_hit_rates(
+    records: list[DecisionRecord],
+) -> dict[str, tuple[float, int]]:
+    """Hit-rate + sample count per domain.
+
+    Returns `{domain: (hit_rate, n)}` so callers can apply min-sample
+    floors before alerting. Domains absent from the records are absent
+    from the result; "unknown" is used when a record's signals.domain
+    is missing.
+    """
+    counts: dict[str, list[bool]] = defaultdict(list)
+    for r in records:
+        domain = r.get("signals", {}).get("domain", "unknown")
+        counts[domain].append(bool(r["decision"].get("mesh_hit")))
+    return {
+        d: (sum(hits) / len(hits) if hits else 0.0, len(hits))
+        for d, hits in counts.items()
+    }
+
+
+def _fallback_shape_distribution(
+    records: list[DecisionRecord],
+) -> dict[str, float]:
+    """Probability mass over fallback-chain shapes.
+
+    Reuses `fallback_chain_shape_histogram` for shape keying so today's
+    and prior's distributions are computed identically. Returns a
+    {shape: probability} map summing to ~1.0; empty input → empty dict.
+    """
+    histogram = fallback_chain_shape_histogram(records)
+    total = sum(c for _, c in histogram)
+    if total == 0:
+        return {}
+    return {shape: count / total for shape, count in histogram}
+
+
+def _kl_divergence(p: dict[str, float], q: dict[str, float]) -> float:
+    """KL(p || q) over a shape distribution, with Laplace smoothing.
+
+    Both distributions are smoothed by `_KL_SMOOTHING` over the UNION of
+    their support so the log-ratio doesn't blow up on shapes present in
+    only one. Returns 0.0 if both are empty (no fallback data either
+    run); returns the actual divergence in nats otherwise.
+    """
+    support = set(p) | set(q)
+    if not support:
+        return 0.0
+    # Smooth: each shape gets (count + smoothing) / (total + smoothing * |support|).
+    # We don't have raw counts here, so reverse-engineer: a probability
+    # entry of 0 becomes _KL_SMOOTHING / (|support| * _KL_SMOOTHING) after
+    # smoothing, which simplifies to 1 / |support|. To make the math
+    # tractable, blend each input with a uniform distribution over the
+    # support at weight `_KL_SMOOTHING`. This preserves the high-prob
+    # shapes' ranking while flooring zero-prob shapes.
+    n = len(support)
+    uniform = 1.0 / n
+    smoothed_p = {
+        s: (1.0 - _KL_SMOOTHING) * p.get(s, 0.0) + _KL_SMOOTHING * uniform
+        for s in support
+    }
+    smoothed_q = {
+        s: (1.0 - _KL_SMOOTHING) * q.get(s, 0.0) + _KL_SMOOTHING * uniform
+        for s in support
+    }
+    divergence = 0.0
+    for s in support:
+        pi = smoothed_p[s]
+        qi = smoothed_q[s]
+        if pi > 0.0:
+            divergence += pi * math.log(pi / qi)
+    return max(0.0, divergence)
+
+
 def detect_drift(
     today: list[DecisionRecord],
     prior: list[DecisionRecord] | None,
     *,
     alert_threshold_pct: float = DEFAULT_ALERT_THRESHOLD_PCT,
+    per_domain_alert_threshold_pct: float = DEFAULT_PER_DOMAIN_THRESHOLD_PCT,
+    fallback_shape_kl_threshold: float = DEFAULT_KL_THRESHOLD,
 ) -> DriftReport:
     """Compare today's replay against the prior run.
 
     No prior run → no alert (first-night), but report still emitted so
     history captures today's baseline.
 
-    Δhit-rate: today_pct - prior_pct (signed). Alerts on absolute > threshold.
+    Aggregate Δhit-rate: today_pct - prior_pct (signed). Alerts on
+    absolute > alert_threshold_pct.
+
     New fallback domains: domains in today's cloud-fallback set that were
     NOT in prior's set. (Removed-from-fallback domains are also relevant
     but less worrying; they're noted, not alerted.)
+
+    Per-domain drift (M2): |Δhit-rate| > per_domain_alert_threshold_pct
+    in any domain with ≥PER_DOMAIN_MIN_SAMPLES in BOTH runs. Catches
+    "aggregate looks fine but one workload class collapsed" failures
+    that aggregate Δ hides.
+
+    Fallback-chain shape KL (M2): KL(today || prior) over the
+    distribution of distinct fallback-chain shapes. >
+    fallback_shape_kl_threshold (default 0.3 nats) signals that traffic
+    is taking materially different fallback paths than yesterday — e.g.,
+    a specialist died and its cloud-fallback chain now dominates.
     """
     today_stats = summary_stats(today)
     today_rate = today_stats["mesh_hit_rate"]
     today_fb = _fallback_domains(today)
+    today_per_domain = _per_domain_hit_rates(today)
 
     if not prior:
         return DriftReport(
@@ -110,6 +229,8 @@ def detect_drift(
             delta_hit_rate_pct=0.0,
             new_fallback_domains=[],
             reasons=["no prior run; baseline captured today"],
+            per_domain_drift={d: 0.0 for d in today_per_domain},
+            fallback_shape_kl=0.0,
         )
 
     prior_stats = summary_stats(prior)
@@ -118,6 +239,17 @@ def detect_drift(
 
     prior_fb = _fallback_domains(prior)
     new_fb = sorted(today_fb - prior_fb)
+
+    prior_per_domain = _per_domain_hit_rates(prior)
+    per_domain_drift: dict[str, float] = {}
+    for domain in set(today_per_domain) | set(prior_per_domain):
+        today_rate_d, _ = today_per_domain.get(domain, (0.0, 0))
+        prior_rate_d, _ = prior_per_domain.get(domain, (0.0, 0))
+        per_domain_drift[domain] = (today_rate_d - prior_rate_d) * 100.0
+
+    today_dist = _fallback_shape_distribution(today)
+    prior_dist = _fallback_shape_distribution(prior)
+    shape_kl = _kl_divergence(today_dist, prior_dist)
 
     reasons: list[str] = []
     alert = False
@@ -131,9 +263,43 @@ def detect_drift(
     if new_fb:
         reasons.append(f"new fallback domains: {', '.join(new_fb)}")
         alert = True
+
+    # M2: per-domain drift — only alert on domains with enough samples
+    # in BOTH runs (otherwise it's noise).
+    significant_domain_alerts: list[str] = []
+    for domain, drift_pp in per_domain_drift.items():
+        _, n_today = today_per_domain.get(domain, (0.0, 0))
+        _, n_prior = prior_per_domain.get(domain, (0.0, 0))
+        if (
+            n_today < PER_DOMAIN_MIN_SAMPLES
+            or n_prior < PER_DOMAIN_MIN_SAMPLES
+        ):
+            continue
+        if abs(drift_pp) > per_domain_alert_threshold_pct:
+            significant_domain_alerts.append(
+                f"{domain}: {drift_pp:+.1f}pp"
+            )
+    if significant_domain_alerts:
+        reasons.append(
+            f"per-domain drift (|Δ|>{per_domain_alert_threshold_pct:.0f}pp): "
+            + ", ".join(sorted(significant_domain_alerts))
+        )
+        alert = True
+
+    # M2: fallback-chain-shape KL divergence — alerts when WHERE we fall
+    # back redistributes materially, even if hit-rate looks unchanged.
+    if shape_kl > fallback_shape_kl_threshold:
+        reasons.append(
+            f"fallback-shape KL {shape_kl:.2f} > threshold "
+            f"{fallback_shape_kl_threshold:.2f} — chain mix shifted"
+        )
+        alert = True
+
     if not alert:
         reasons.append(
-            f"stable (Δhit-rate {delta_pct:+.1f}pp, no new fallback domains)"
+            f"stable (Δhit-rate {delta_pct:+.1f}pp, "
+            f"shape-KL {shape_kl:.2f}, "
+            f"no new fallback domains)"
         )
 
     return DriftReport(
@@ -143,6 +309,8 @@ def detect_drift(
         delta_hit_rate_pct=delta_pct,
         new_fallback_domains=new_fb,
         reasons=reasons,
+        per_domain_drift=per_domain_drift,
+        fallback_shape_kl=shape_kl,
     )
 
 
@@ -191,6 +359,8 @@ def _write_alert(alert_path: Path, report: DriftReport, today_path: Path) -> Non
         "prior_hit_rate": report.prior_hit_rate,
         "delta_hit_rate_pct": report.delta_hit_rate_pct,
         "new_fallback_domains": report.new_fallback_domains,
+        "per_domain_drift": report.per_domain_drift,
+        "fallback_shape_kl": report.fallback_shape_kl,
         "reasons": report.reasons,
     }
     with alert_path.open("a", encoding="utf-8") as f:
