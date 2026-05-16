@@ -326,6 +326,14 @@ def _allocate_tiered(
     if hot_t3:
         _fill_tier(3, hot_t3 & TIER_3_DOMAINS)
 
+    # Multi-specialist coexistence (spec §3.3 secondaries):
+    # On any already-assigned node whose effective memory has 2× headroom
+    # past primary.runtime_gb, opportunistically add up to one more
+    # specialist from an uncovered tier-1/tier-2 domain. This is how a
+    # 128GB-unified-mem Spark hosts code AND general on one box, instead
+    # of forcing a 1-domain-per-node fan-out that wastes RAM.
+    _fill_secondaries(nodes, suggestions, catalog, coverage)
+
     # Promote replicas for nodes still unassigned: pick the most-trafficked
     # tier-1 domain (default "general") and let the node host a replica.
     if remaining:
@@ -376,6 +384,80 @@ def _allocate_tiered(
             )
 
     return suggestions
+
+
+def _fill_secondaries(
+    nodes: list[NodeProbe],
+    suggestions: dict[NodeId, NodeSuggestion],
+    catalog: list[SpecialistCard],
+    coverage: dict[DomainId, set[NodeId]],
+) -> None:
+    """Promote a second specialist onto high-memory nodes (spec §3.3).
+
+    Rule: on each node where the assigned primary uses ≤ half the node's
+    effective memory, search the catalog for the highest-scoring uncovered
+    tier-1/tier-2 specialist that ALSO fits in remaining headroom. If
+    found, attach as secondary and mark domain covered. One secondary
+    per node max in v0.0.3 (n-way packing is v0.0.4+).
+
+    Skipped if primary is None (registry-only node) or if no uncovered
+    tier-1/tier-2 specialist fits the remaining memory budget.
+
+    This mutates `suggestions` in place by replacing the NodeSuggestion
+    record with one carrying `secondaries=[chosen]`. Coverage map is also
+    updated so subsequent suggestion lookups see the new domain.
+    """
+    node_by_id = {n.node_id: n for n in nodes}
+    for node_id, sugg in list(suggestions.items()):
+        if sugg.primary is None:
+            continue
+        node = node_by_id.get(node_id)
+        if node is None:
+            continue
+        eff_mem = _effective_vram_gb(node)
+        if eff_mem <= 0:
+            continue
+        primary_share = sugg.primary.runtime_gb / eff_mem
+        if primary_share > 0.5:
+            # Primary already takes >50% of memory; coexistence risks OOM.
+            continue
+        remaining_mem = eff_mem - sugg.primary.runtime_gb
+        # Candidate domains: tier-1 + tier-2 not yet covered (anywhere).
+        covered_domains = set(coverage.keys())
+        eligible_tiers = TIER_1_DOMAINS | TIER_2_DOMAINS
+        candidates = [
+            s for s in catalog
+            if s.domain in eligible_tiers
+            and s.domain not in covered_domains
+            and s.specialist_id != sugg.primary.specialist_id
+            and s.runtime_gb <= remaining_mem
+        ]
+        if not candidates:
+            continue
+        # Rank by score under current coverage; pick highest finite.
+        scored = _rank_specs_for_node(node, candidates, coverage)
+        chosen: SpecialistCard | None = None
+        chosen_score = -math.inf
+        for sc, spec in scored:
+            if sc > -math.inf:
+                chosen, chosen_score = spec, sc
+                break
+        if chosen is None:
+            continue
+        coverage.setdefault(chosen.domain, set()).add(node.node_id)
+        suggestions[node_id] = NodeSuggestion(
+            node_id=node_id,
+            primary=sugg.primary,
+            secondaries=[chosen],
+            alternates=sugg.alternates,
+            rationale=(
+                f"{sugg.rationale} + secondary {chosen.specialist_id} "
+                f"(domain={chosen.domain} score={chosen_score:.2f}, "
+                f"fits {chosen.runtime_gb:.1f}GB of {remaining_mem:.1f}GB headroom)"
+            ),
+            sticky=sugg.sticky,
+            fit_score=sugg.fit_score,
+        )
 
 
 __all__ = [

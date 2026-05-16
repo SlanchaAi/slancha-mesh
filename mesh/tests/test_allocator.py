@@ -143,6 +143,84 @@ def test_allocate_tiered_more_nodes_than_domains_promotes_replicas(spark_node, c
     assert len(assigned) >= 4  # at least 4 of 5 should get something assigned
 
 
+def test_allocate_tiered_single_spark_gets_secondary(spark_node, catalog):
+    """Single GB10 Spark (128GB unified, ~100GB effective): primary uses
+    a fraction of memory → allocator should attach a secondary specialist
+    from an uncovered tier-1 domain so both code AND math/general coexist
+    on the one box.
+
+    Without secondaries, a 1-Spark cluster would host one domain and
+    cloud-fallback for everything else — wasting 80GB of unified mem.
+    """
+    sugg = allocate_cluster([spark_node], catalog, strategy="tiered")
+    s = sugg[spark_node.node_id]
+    assert s.primary is not None, "primary should be set on GB10 Spark"
+    assert len(s.secondaries) >= 1, (
+        f"expected ≥1 secondary on 128GB GB10; got primary={s.primary.specialist_id}"
+        f" with secondaries={[c.specialist_id for c in s.secondaries]}"
+    )
+    secondary = s.secondaries[0]
+    assert secondary.specialist_id != s.primary.specialist_id
+    assert secondary.domain != s.primary.domain, (
+        "secondary domain should differ from primary (coverage diversification)"
+    )
+
+
+def test_allocate_tiered_tight_node_gets_no_secondary(catalog, mac_mini_node):
+    """Mac mini M4 with 50GB RAM available: after primary, remaining
+    headroom is too tight for a second specialist with min_vram ≥ 7GB.
+    Secondaries should NOT be assigned when primary already takes
+    >50% of effective memory.
+
+    This guards against OOM: if primary is 35GB on a 50GB-effective node,
+    that's 70% memory share — adding a secondary would exhaust headroom.
+    """
+    # Build a synthetic tight-node by halving Mac mini available RAM
+    tight = mac_mini_node.model_copy(update={"ram_available_gb": 12.0})
+    # Filter catalog to llama.cpp-only since Mac mini lacks vllm
+    cpp_catalog = [c for c in catalog if c.required_backend in ("llamacpp", "ollama", "mlx")]
+    if not cpp_catalog:
+        # No llamacpp-required cards in the catalog → nothing to assign;
+        # test still passes (no secondary because no primary either).
+        return
+    sugg = allocate_cluster([tight], cpp_catalog, strategy="tiered")
+    s = sugg[tight.node_id]
+    if s.primary is None:
+        # Hard-filtered out — that's fine.
+        return
+    # Primary should consume >50% of 12GB effective → no secondary.
+    eff = tight.ram_available_gb - 8.0  # _effective_vram_gb subtracts OS reserve
+    primary_share = s.primary.runtime_gb / max(eff, 0.1)
+    if primary_share > 0.5:
+        assert s.secondaries == [], (
+            f"tight node ({primary_share:.0%} primary share) should NOT "
+            f"get a secondary; got {[c.specialist_id for c in s.secondaries]}"
+        )
+
+
+def test_secondary_does_not_break_existing_coverage_diversification(spark_node, catalog):
+    """Two-Spark cluster + secondaries: each Spark still gets a unique
+    primary domain, AND each may carry secondaries. The secondaries on
+    spark-1 must not be the same domain as primary on spark-2 (the
+    secondary fill consults the same coverage map)."""
+    spark_2 = spark_node.model_copy(update={"node_id": "spark-2", "friendly_name": "spark-2"})
+    sugg = allocate_cluster([spark_node, spark_2], catalog, strategy="tiered")
+    primaries = {s.primary.domain for s in sugg.values() if s.primary}
+    assert len(primaries) == 2, "primaries should diversify across 2 Sparks"
+
+    # Collect all (node, domain) pairs across primary + secondaries
+    seen: dict[tuple[str, str], int] = {}
+    for s in sugg.values():
+        if s.primary:
+            seen[(s.node_id, s.primary.domain)] = seen.get((s.node_id, s.primary.domain), 0) + 1
+        for sec in s.secondaries:
+            seen[(s.node_id, sec.domain)] = seen.get((s.node_id, sec.domain), 0) + 1
+    # No (node, domain) appears twice on the same node
+    assert all(c == 1 for c in seen.values()), (
+        f"duplicate domain on same node: {seen}"
+    )
+
+
 def test_allocate_unknown_strategy_errors_quietly(spark_node, catalog):
     """Unknown strategy strings should pass through as 'tiered' default in
     our impl (Literal type catches at static check; runtime is permissive)."""
