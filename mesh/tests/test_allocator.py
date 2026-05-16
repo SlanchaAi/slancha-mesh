@@ -198,6 +198,24 @@ def test_allocate_tiered_tight_node_gets_no_secondary(catalog, mac_mini_node):
         )
 
 
+def test_secondary_count_invariant_v003(spark_node, catalog):
+    """v0.0.3 invariant: at most one secondary per node.
+
+    Guards against future regression when n-secondaries lands in v0.0.4+.
+    The current `_fill_secondaries` breaks after the first finite-score
+    candidate; this test locks that contract via an explicit assert so
+    a future loop refactor surfaces immediately.
+    """
+    spark_2 = spark_node.model_copy(update={"node_id": "spark-2", "friendly_name": "spark-2"})
+    nodes = [spark_node, spark_2]
+    sugg = allocate_cluster(nodes, catalog, strategy="tiered")
+    for s in sugg.values():
+        assert len(s.secondaries) <= 1, (
+            f"v0.0.3 caps secondaries at 1 per node; got {len(s.secondaries)} "
+            f"on {s.node_id} ({[c.specialist_id for c in s.secondaries]})"
+        )
+
+
 def test_secondary_does_not_break_existing_coverage_diversification(spark_node, catalog):
     """Two-Spark cluster + secondaries: each Spark still gets a unique
     primary domain, AND each may carry secondaries. The secondaries on
