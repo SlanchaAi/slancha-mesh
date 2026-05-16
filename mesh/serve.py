@@ -40,6 +40,8 @@ from mesh.models import (
 )
 from mesh.probe import probe_node
 from mesh.registry import HeartbeatPostRequest, MeshRegistry
+from mesh.replay_store import TrafficReplayStore
+from mesh.training import TrainingPass
 
 HEARTBEAT_INTERVAL_S = 5.0
 RUNTIME_DIR = Path(__file__).parent / ".runtime"
@@ -67,13 +69,26 @@ class ServeDaemon:
     heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S
     log_path: Path | None = None
     # Idle fine-tune detector — observes util signals each heartbeat;
-    # caller spawns training thread on its READY_TO_TRAIN edge. Default
-    # None (disabled) so v0.0.3-shape callers stay unchanged.
+    # daemon spawns training thread on its READY_TO_TRAIN edge when
+    # training_replay_store + training_checkpoint_dir are both set.
+    # Default None (disabled) so v0.0.3-shape callers stay unchanged.
     idle_detector: IdleDetector | None = None
+    # Training integration (v0.0.5 #39): both must be set to enable
+    # idle-fine-tune. Detector → fires READY_TO_TRAIN → daemon spawns
+    # TrainingPass thread that respects detector.preempt_event. On
+    # return (natural or preempt): daemon calls detector.finish_training.
+    # If either is None, training is disabled even when detector is set.
+    training_replay_store: TrafficReplayStore | None = None
+    training_checkpoint_dir: Path | None = None
+    # Per-pass kwargs (n_examples, n_steps_planned, per_step_sleep_s, seed).
+    # Defaults are TrainingPass defaults (20 stub steps × 1ms).
+    training_kwargs: dict | None = None
 
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
     _heartbeats_sent: int = field(default=0, init=False)
+    _training_thread: threading.Thread | None = field(default=None, init=False)
+    _last_checkpoint_path: Path | None = field(default=None, init=False)
 
     # --- lifecycle ---
 
@@ -103,6 +118,12 @@ class ServeDaemon:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
+        # Preempt in-flight training pass so we don't orphan it on shutdown.
+        if self._training_thread is not None and self._training_thread.is_alive():
+            if self.idle_detector is not None:
+                self.idle_detector.signal_preempt()
+            self._training_thread.join(timeout=5.0)
+            self._training_thread = None
         for be in self.backends:
             try:
                 be.stop(timeout=timeout)
@@ -145,17 +166,40 @@ class ServeDaemon:
             max_queue = max(max_queue, int(util.get("queue_depth", 0)))
 
         util_obj = NodeUtilization(queue_depth=max_queue)
-        # Detector observation + health override:
-        # If the detector is in TRAINING state, the heartbeat reports
-        # "training" instead of "healthy" so the router drops
-        # hot-interactive traffic per spec §6.4 + §7.
+        # Detector observation + training spawn + health override.
+        # If detector is set: observe util, transition state, fold
+        # detector.health() into the heartbeat.
+        # If training is configured + detector says READY_TO_TRAIN:
+        # spawn a TrainingPass thread + transition detector to TRAINING.
+        # If state is TRAINING + traffic returned: signal preempt; the
+        # training thread polls preempt_event and yields cleanly.
+        # On natural training completion: thread join triggers
+        # finish_training() to enter COOLDOWN.
         # When no backends are loaded, "degraded" wins (capacity > training).
         if loaded and self.idle_detector is not None:
             self.idle_detector.observe(util_obj, now)
+
+            # Reap completed training thread → COOLDOWN transition.
+            if (
+                self._training_thread is not None
+                and not self._training_thread.is_alive()
+                and self.idle_detector.state.value == "training"
+            ):
+                self._training_thread = None
+                try:
+                    self.idle_detector.finish_training(now)
+                except RuntimeError:
+                    pass  # Race: state may have flipped; harmless.
+
+            # Spawn training on READY_TO_TRAIN edge.
+            if self.idle_detector.should_start_training() and self._training_enabled() and loaded:
+                self._spawn_training_thread(primary=loaded[0])
+
             base_health = self.idle_detector.health()
-            # Preempt: if a hot request arrived while we were TRAINING,
-            # the queue_depth > 0 signal we just observed should also
-            # tell the training thread to yield.
+
+            # Preempt: traffic returned mid-training → tell the training
+            # thread to checkpoint + yield. Thread reap happens on the
+            # next heartbeat.
             if (
                 self.idle_detector.state.value == "training"
                 and not self.idle_detector._is_idle(util_obj)
@@ -188,6 +232,75 @@ class ServeDaemon:
     @property
     def heartbeats_sent(self) -> int:
         return self._heartbeats_sent
+
+    # --- training integration (v0.0.5 #39) ---
+
+    def _training_enabled(self) -> bool:
+        """True iff all training-config fields are set."""
+        return (
+            self.training_replay_store is not None
+            and self.training_checkpoint_dir is not None
+            and self._training_thread is None
+        )
+
+    def _spawn_training_thread(self, primary: LoadedModel) -> None:
+        """Build a TrainingPass for the primary specialist + spawn it.
+
+        Detector transitions READY_TO_TRAIN → TRAINING via
+        mark_training_started; thread runs in background, polls
+        preempt_event each step, writes checkpoint on return.
+        """
+        assert self.idle_detector is not None
+        assert self.training_replay_store is not None
+        assert self.training_checkpoint_dir is not None
+
+        kwargs = dict(self.training_kwargs or {})
+        # Find the matching SpecialistCard to extract domain / base model.
+        primary_card = None
+        for be in self.backends:
+            if be.card.specialist_id == primary.specialist_id:
+                primary_card = be.card
+                break
+        if primary_card is None:
+            self._log(f"[training] no card for {primary.specialist_id}; skipping spawn")
+            return
+
+        pass_ = TrainingPass(
+            specialist_id=primary_card.specialist_id,
+            base_model_id=primary_card.model_id,
+            domain=primary_card.domain,
+            replay_store=self.training_replay_store,
+            checkpoint_dir=self.training_checkpoint_dir,
+            **kwargs,
+        )
+        try:
+            self.idle_detector.mark_training_started()
+        except RuntimeError as exc:
+            # Lost the race; detector moved out of READY_TO_TRAIN.
+            self._log(f"[training] mark_training_started lost race: {exc}")
+            return
+
+        preempt_event = self.idle_detector.preempt_event
+
+        def _runner() -> None:
+            try:
+                self._last_checkpoint_path = pass_.run(preempt_event=preempt_event)
+                self._log(
+                    f"[training] checkpoint @ {self._last_checkpoint_path} "
+                    f"steps={pass_.meta.n_steps_completed if pass_.meta else '?'} "
+                    f"preempted={pass_.meta.preempted if pass_.meta else '?'}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"[training] pass failed: {exc}")
+
+        self._training_thread = threading.Thread(
+            target=_runner, daemon=True, name=f"training-{primary_card.specialist_id}"
+        )
+        self._training_thread.start()
+
+    @property
+    def last_checkpoint_path(self) -> Path | None:
+        return self._last_checkpoint_path
 
     # --- internals ---
 

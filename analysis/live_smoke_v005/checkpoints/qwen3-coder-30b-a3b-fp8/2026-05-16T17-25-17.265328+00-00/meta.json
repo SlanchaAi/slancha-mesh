@@ -1,0 +1,14 @@
+{
+  "specialist_id": "qwen3-coder-30b-a3b-fp8",
+  "base_model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
+  "domain": "code",
+  "seed": 42,
+  "n_examples": 10,
+  "n_steps_completed": 50,
+  "n_steps_planned": 50,
+  "started_at": "2026-05-16T17:25:17.265328+00:00",
+  "finished_at": "2026-05-16T17:25:17.776284+00:00",
+  "preempted": false,
+  "corpus_hash": "sha256:05683f40ac0d4cb39ecc5a73377baaea9838f98089df04bbff48a8f04ba3862b",
+  "stub": true
+}
