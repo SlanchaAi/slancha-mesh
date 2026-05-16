@@ -30,6 +30,7 @@ from pathlib import Path
 
 from mesh.backends import BaseBackend, NullBackend, VLLMBackend
 from mesh.catalog import load_catalog
+from mesh.idle import IdleDetector
 from mesh.models import (
     LoadedModel,
     NodeHeartbeat,
@@ -65,6 +66,10 @@ class ServeDaemon:
     node_url_template: str = "http://{host}:{port}"
     heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S
     log_path: Path | None = None
+    # Idle fine-tune detector — observes util signals each heartbeat;
+    # caller spawns training thread on its READY_TO_TRAIN edge. Default
+    # None (disabled) so v0.0.3-shape callers stay unchanged.
+    idle_detector: IdleDetector | None = None
 
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
@@ -139,13 +144,33 @@ class ServeDaemon:
             util = be.utilization() or {}
             max_queue = max(max_queue, int(util.get("queue_depth", 0)))
 
+        util_obj = NodeUtilization(queue_depth=max_queue)
+        # Detector observation + health override:
+        # If the detector is in TRAINING state, the heartbeat reports
+        # "training" instead of "healthy" so the router drops
+        # hot-interactive traffic per spec §6.4 + §7.
+        # When no backends are loaded, "degraded" wins (capacity > training).
+        if loaded and self.idle_detector is not None:
+            self.idle_detector.observe(util_obj, now)
+            base_health = self.idle_detector.health()
+            # Preempt: if a hot request arrived while we were TRAINING,
+            # the queue_depth > 0 signal we just observed should also
+            # tell the training thread to yield.
+            if (
+                self.idle_detector.state.value == "training"
+                and not self.idle_detector._is_idle(util_obj)
+            ):
+                self.idle_detector.signal_preempt()
+        else:
+            base_health = "healthy" if loaded else "degraded"
+
         return NodeHeartbeat(
             node_id=self.probe.node_id,
             ts=now,
             hardware=self.probe,
             loaded_models=loaded,
-            util=NodeUtilization(queue_depth=max_queue),
-            health="healthy" if loaded else "degraded",
+            util=util_obj,
+            health=base_health,
         )
 
     def post_heartbeat(self) -> None:
