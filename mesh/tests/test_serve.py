@@ -109,6 +109,182 @@ def test_daemon_without_idle_detector_is_backwards_compatible():
     daemon.stop()
 
 
+def test_daemon_spawns_training_thread_on_ready_edge(tmp_path):
+    """Integration (#39): detector READY_TO_TRAIN + training config →
+    daemon spawns TrainingPass thread on next heartbeat. Thread runs
+    to completion; subsequent heartbeat reaps it → COOLDOWN."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    import time as _time
+
+    from mesh.idle import IdleDetector
+    from mesh.models import NodeUtilization as _NU
+    from mesh.replay_store import TrafficReplayStore
+
+    card = _card()
+    be = NullBackend(card=card)
+    detector = IdleDetector()
+    store = TrafficReplayStore(max_size=10)
+    for i in range(3):
+        store.add(f"p{i}", f"r{i}", "code", "easy")
+
+    daemon = ServeDaemon(
+        backends=[be],
+        probe=_probe(),
+        idle_detector=detector,
+        training_replay_store=store,
+        training_checkpoint_dir=tmp_path,
+        training_kwargs={"n_steps_planned": 3, "per_step_sleep_s": 0.001},
+    )
+    daemon.start(wait_ready=True, ready_timeout=1.0)
+
+    anchor = _dt(2026, 5, 16, 12, 0, 0, tzinfo=_tz.utc)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor + _td(seconds=61))
+    assert detector.should_start_training()
+
+    # First heartbeat: spawns training thread, transitions to TRAINING.
+    hb1 = daemon.heartbeat()
+    assert hb1.health == "training"
+    assert daemon._training_thread is not None
+
+    _time.sleep(0.1)
+    assert not daemon._training_thread.is_alive()
+
+    # Second heartbeat: reaps thread → COOLDOWN.
+    hb2 = daemon.heartbeat()
+    assert detector.state.value == "cooldown"
+    assert hb2.health == "healthy"
+    assert daemon.last_checkpoint_path is not None
+    assert daemon.last_checkpoint_path.exists()
+
+    daemon.stop()
+
+
+def test_daemon_preempts_training_when_traffic_returns(tmp_path):
+    """Backend reports queue_depth > 0 mid-training → daemon signals
+    preempt → training thread yields with preempted=True."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    import time as _time
+    import json
+
+    from mesh.idle import IdleDetector
+    from mesh.models import NodeUtilization as _NU
+    from mesh.replay_store import TrafficReplayStore
+
+    card = _card()
+
+    class BusyBackend(NullBackend):
+        def utilization(self) -> dict:
+            return {"queue_depth": 5}
+
+    be_idle = NullBackend(card=card)
+    detector = IdleDetector()
+    store = TrafficReplayStore(max_size=10)
+    for i in range(3):
+        store.add(f"p{i}", f"r{i}", "code", "easy")
+
+    daemon = ServeDaemon(
+        backends=[be_idle],
+        probe=_probe(),
+        idle_detector=detector,
+        training_replay_store=store,
+        training_checkpoint_dir=tmp_path,
+        training_kwargs={"n_steps_planned": 5000, "per_step_sleep_s": 0.001},
+    )
+    daemon.start(wait_ready=True, ready_timeout=1.0)
+
+    anchor = _dt(2026, 5, 16, 12, 0, 0, tzinfo=_tz.utc)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor + _td(seconds=61))
+    daemon.heartbeat()  # spawns
+    assert daemon._training_thread.is_alive()
+
+    # Swap to busy backend → next heartbeat sees queue_depth=5 → preempts.
+    daemon.backends = [BusyBackend(card=card, base_url="http://x")]
+    daemon.backends[0].start()
+    _time.sleep(0.02)
+    daemon.heartbeat()  # observes busy → signal_preempt
+
+    daemon._training_thread.join(timeout=2.0)
+    assert not daemon._training_thread.is_alive()
+
+    daemon.heartbeat()  # reap → COOLDOWN
+    assert detector.state.value == "cooldown"
+
+    ck = daemon.last_checkpoint_path
+    assert ck is not None
+    meta = json.loads((ck / "meta.json").read_text())
+    assert meta["preempted"] is True
+    assert 0 < meta["n_steps_completed"] < 5000
+
+    daemon.stop()
+
+
+def test_daemon_training_disabled_without_config():
+    """idle_detector set + training config NOT set → detector observes,
+    but daemon never spawns training thread (back-compat)."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    from mesh.idle import IdleDetector
+    from mesh.models import NodeUtilization as _NU
+
+    card = _card()
+    be = NullBackend(card=card)
+    detector = IdleDetector()
+    daemon = ServeDaemon(
+        backends=[be],
+        probe=_probe(),
+        idle_detector=detector,
+        # training_replay_store + checkpoint_dir intentionally None
+    )
+    daemon.start(wait_ready=True, ready_timeout=1.0)
+
+    anchor = _dt(2026, 5, 16, 12, 0, 0, tzinfo=_tz.utc)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor + _td(seconds=61))
+    assert detector.should_start_training()
+
+    hb = daemon.heartbeat()
+    assert detector.state.value == "ready_to_train"  # never advanced
+    assert hb.health == "healthy"
+    assert daemon._training_thread is None
+
+    daemon.stop()
+
+
+def test_daemon_stop_preempts_inflight_training(tmp_path):
+    """daemon.stop() during training → signals preempt, joins cleanly."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    from mesh.idle import IdleDetector
+    from mesh.models import NodeUtilization as _NU
+    from mesh.replay_store import TrafficReplayStore
+
+    card = _card()
+    be = NullBackend(card=card)
+    detector = IdleDetector()
+    store = TrafficReplayStore(max_size=10)
+    store.add("p", "r", "code", "easy")
+
+    daemon = ServeDaemon(
+        backends=[be],
+        probe=_probe(),
+        idle_detector=detector,
+        training_replay_store=store,
+        training_checkpoint_dir=tmp_path,
+        training_kwargs={"n_steps_planned": 50000, "per_step_sleep_s": 0.001},
+    )
+    daemon.start(wait_ready=True, ready_timeout=1.0)
+    anchor = _dt(2026, 5, 16, 12, 0, 0, tzinfo=_tz.utc)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor + _td(seconds=61))
+    daemon.heartbeat()  # spawns training (would take 50s without preempt)
+
+    assert daemon._training_thread.is_alive()
+    daemon.stop(timeout=5.0)
+    assert daemon._training_thread is None
+
+
 def test_daemon_serves_multiple_backends_on_distinct_ports():
     """Multi-specialist coexistence (spec §3.3): GB10 with 128GB unified mem
     runs code AND math/general simultaneously, each on its own port.
