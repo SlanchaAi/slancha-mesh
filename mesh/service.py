@@ -130,12 +130,19 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
     """
     reg = registry if registry is not None else MeshRegistry()
 
+    # v0.0.7 #44: cluster reservation store, in-process on the registry.
+    # Survives across requests + threads; lost on restart (intentional for
+    # v0.0.7 — short-lived reservations don't need durability).
+    from mesh.gpu.cluster import ClusterReservationStore as _CRS
+    cluster_reservations = _CRS()
+
     app = FastAPI(
         title="Slancha-Mesh Registry",
-        version="0.0.3",
-        description="Node-side registry: heartbeats, snapshots, allocation.",
+        version="0.0.7",
+        description="Node-side registry: heartbeats, snapshots, allocation, cluster GPU reservations.",
     )
     app.state.registry = reg
+    app.state.cluster_reservations = cluster_reservations
 
     @app.post(
         "/heartbeat",
@@ -236,7 +243,10 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
             }
           }
         """
-        from mesh.gpu.cluster import build_cluster_view_from_heartbeats
+        from mesh.gpu.cluster import (
+            apply_cluster_reservations_to_view,
+            build_cluster_view_from_heartbeats,
+        )
         from mesh.registry import HeartbeatEvent
 
         # Walk the event log for the most-recent heartbeat per node.
@@ -254,8 +264,14 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
                 }
 
         view = build_cluster_view_from_heartbeats(list(latest.values()))
+        # v0.0.7 #44: merge cluster-tracked reservations into per-node view
+        # so free_gb_after_reservations reflects both local AND cluster claims.
+        view = apply_cluster_reservations_to_view(view, cluster_reservations)
         return {
             "snapshot_ts": view.snapshot_ts.isoformat(),
+            "cluster_reservations": [
+                r.to_json() for r in cluster_reservations.list_active()
+            ],
             "nodes": {
                 nid: {
                     "friendly_name": n.friendly_name,
@@ -276,53 +292,62 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
 
     @app.post(
         "/gpu/reserve",
-        summary="Cluster-aware GPU reservation (registers intent)",
+        summary="Cluster-wide GPU reservation (registry-tracked)",
     )
     def post_gpu_reserve(
         body: dict,
         _: Annotated[None, Depends(verify_node_token)],
     ) -> dict:
-        """Register a cluster-level reservation intent.
+        """Create a cluster-tracked GPU reservation (v0.0.7 #44).
 
-        Body: {node_id?, gb_requested, duration_s, purpose?, hardware_tags?}
+        Body: {gb_requested, duration_s, node_id?, purpose?, hardware_tags?, user?}
 
-        If node_id provided, the reservation is recorded as "intended for
-        that node" and SHOULD be claimed via `mesh-gpu reserve` on that
-        node within the duration window. If omitted, the registry picks
-        best-fit + returns the chosen node_id; caller is expected to ssh
-        to that node + claim locally.
+        Behavior:
+        - If node_id provided, reservation is bound to that node.
+        - Else: pick_best_node + bind to chosen.
+        - Reservation stored in registry's in-memory ClusterReservationStore.
+        - GET /gpu/cluster reflects it in per-node reserved_gb + cluster_reservations list.
+        - Expires automatically after duration_s.
+        - DELETE /gpu/reserve/<id> releases early.
 
-        This is a CLUSTER-LEVEL intent; the actual GPU memory hold lives
-        in the chosen node's local ReservationStore. The registry tracks
-        outstanding intents for visibility but doesn't enforce them at
-        the kernel.
+        v0.0.7 ships REGISTRY-TRACKED reservations (no kernel enforcement,
+        no cross-node fan-out). v0.0.8 (mac, pull-via-heartbeat) will fan
+        out to the chosen node's local ReservationStore so the node's own
+        view + heartbeat reflect the reservation too.
         """
-        from mesh.gpu.cluster import build_cluster_view_from_heartbeats, pick_best_node
+        from mesh.gpu.cluster import (
+            apply_cluster_reservations_to_view,
+            build_cluster_view_from_heartbeats,
+            pick_best_node,
+        )
         from mesh.registry import HeartbeatEvent
-
-        # Rebuild view from heartbeats
-        latest: dict[str, dict] = {}
-        for ev in reg.events:
-            if isinstance(ev, HeartbeatEvent):
-                hb = ev.heartbeat
-                gpu = getattr(hb, "gpu", None)
-                if gpu is None:
-                    continue
-                latest[hb.node_id] = {
-                    "node_id": hb.node_id,
-                    "friendly_name": hb.hardware.friendly_name,
-                    "gpu": gpu,
-                }
-        view = build_cluster_view_from_heartbeats(list(latest.values()))
 
         gb = float(body.get("gb_requested", 0))
         if gb <= 0:
             raise HTTPException(status_code=400, detail="gb_requested must be > 0")
+        duration_s = float(body.get("duration_s", 0))
+        if duration_s <= 0:
+            raise HTTPException(status_code=400, detail="duration_s must be > 0")
 
         target_node = body.get("node_id")
         require_tags = body.get("hardware_tags")
 
         if target_node is None:
+            # Rebuild view from heartbeats + existing reservations
+            latest: dict[str, dict] = {}
+            for ev in reg.events:
+                if isinstance(ev, HeartbeatEvent):
+                    hb = ev.heartbeat
+                    gpu = getattr(hb, "gpu", None)
+                    if gpu is None:
+                        continue
+                    latest[hb.node_id] = {
+                        "node_id": hb.node_id,
+                        "friendly_name": hb.hardware.friendly_name,
+                        "gpu": gpu,
+                    }
+            view = build_cluster_view_from_heartbeats(list(latest.values()))
+            view = apply_cluster_reservations_to_view(view, cluster_reservations)
             result = pick_best_node(
                 view, gb_requested=gb, require_hardware_tags=require_tags,
             )
@@ -335,19 +360,44 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
                 )
             target_node = result.chosen_node_id
 
-        # v0.0.6: respond with the chosen target + remind caller to claim
-        # locally. v0.0.7 will POST the reservation through to the chosen
-        # node's local store via the mesh substrate (libp2p or HTTP fanout).
+        try:
+            res = cluster_reservations.reserve(
+                chosen_node_id=target_node,
+                user=body.get("user", "unknown"),
+                gb_requested=gb,
+                duration_s=duration_s,
+                purpose=body.get("purpose", ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return res.to_json()
+
+    @app.delete(
+        "/gpu/reserve/{reservation_id}",
+        summary="Release a cluster reservation early",
+    )
+    def delete_gpu_reservation(
+        reservation_id: str,
+        _: Annotated[None, Depends(verify_node_token)],
+    ) -> dict:
+        released = cluster_reservations.release(reservation_id)
+        if not released:
+            raise HTTPException(
+                status_code=404,
+                detail=f"reservation {reservation_id} not found (already expired?)",
+            )
+        return {"reservation_id": reservation_id, "released": True}
+
+    @app.get(
+        "/gpu/reservations",
+        summary="List active cluster reservations",
+    )
+    def list_gpu_reservations(
+        _: Annotated[None, Depends(verify_node_token)],
+    ) -> dict:
         return {
-            "chosen_node_id": target_node,
-            "gb_requested": gb,
-            "duration_s": body.get("duration_s"),
-            "claim_command": (
-                f"ssh {target_node} -- mesh-gpu reserve "
-                f"--gb {gb} --duration {body.get('duration_s', 3600)}s "
-                f"--purpose {body.get('purpose', '')!r}"
-            ),
-            "note": "v0.0.6 returns intent only; v0.0.7 will fan out to node",
+            "reservations": [r.to_json() for r in cluster_reservations.list_active()]
         }
 
     return app

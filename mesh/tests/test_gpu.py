@@ -13,7 +13,10 @@ import pytest
 
 from mesh.gpu.cluster import (
     ClusterGpuView,
+    ClusterReservation,
+    ClusterReservationStore,
     NodeGpuView,
+    apply_cluster_reservations_to_view,
     build_cluster_view_from_heartbeats,
     filter_nodes_by_memory,
     pick_best_node,
@@ -345,3 +348,197 @@ def test_build_cluster_view_from_heartbeats_skips_no_gpu_field():
     assert set(view.nodes.keys()) == {"n2"}
     assert view.nodes["n2"].hardware_tags == ["blackwell"]
     assert view.nodes["n2"].total_gb == 128.0
+
+
+# ---------------------------------------------------------------------------
+# Cluster reservation store — v0.0.7 #44
+# ---------------------------------------------------------------------------
+
+
+def test_cluster_reservation_store_roundtrip():
+    store = ClusterReservationStore()
+    res = store.reserve(
+        chosen_node_id="spark-1", user="admin",
+        gb_requested=60.0, duration_s=3600, purpose="LoRA",
+    )
+    assert isinstance(res, ClusterReservation)
+    assert res.chosen_node_id == "spark-1"
+    assert len(store) == 1
+    fetched = store.get(res.reservation_id)
+    assert fetched is not None
+    assert fetched.gb_requested == 60.0
+
+
+def test_cluster_reservation_release():
+    store = ClusterReservationStore()
+    res = store.reserve("n", "u", 1.0, 3600)
+    assert store.release(res.reservation_id) is True
+    assert store.release(res.reservation_id) is False
+    assert len(store) == 0
+
+
+def test_cluster_reservation_rejects_zero_gb():
+    store = ClusterReservationStore()
+    with pytest.raises(ValueError):
+        store.reserve("n", "u", 0, 3600)
+
+
+def test_cluster_reservation_rejects_zero_duration():
+    store = ClusterReservationStore()
+    with pytest.raises(ValueError):
+        store.reserve("n", "u", 1, 0)
+
+
+def test_cluster_reservation_auto_prunes_expired():
+    store = ClusterReservationStore()
+    # Manually inject an expired reservation
+    past_now = datetime.now(timezone.utc) - timedelta(hours=2)
+    expired_res = ClusterReservation(
+        reservation_id="dead", chosen_node_id="n",
+        user="u", gb_requested=1.0,
+        started_at=past_now,
+        expires_at=past_now + timedelta(hours=1),
+    )
+    with store._lock:
+        store._reservations["dead"] = expired_res
+    active = store.list_active()
+    assert active == []
+    assert len(store) == 0  # auto-pruned
+
+
+def test_cluster_reservation_total_for_node():
+    store = ClusterReservationStore()
+    store.reserve("spark-1", "u1", 10.0, 3600)
+    store.reserve("spark-1", "u2", 20.0, 3600)
+    store.reserve("mac-mini", "u3", 5.0, 3600)
+    assert store.total_for_node("spark-1") == 30.0
+    assert store.total_for_node("mac-mini") == 5.0
+    assert store.total_for_node("nonexistent") == 0.0
+
+
+def test_apply_cluster_reservations_merges_into_view():
+    """Cluster reservation for spark-1 should appear in spark-1's
+    active_reservations + reduce its free_gb_after_reservations."""
+    n = NodeGpuView(
+        node_id="spark-1", friendly_name="spark-1",
+        snapshot=_snap(total_mib=128*1024, procs_gb=[10]),
+        declared_total_gb=128.0,
+    )
+    view = ClusterGpuView(
+        snapshot_ts=datetime.now(timezone.utc),
+        nodes={"spark-1": n},
+    )
+    store = ClusterReservationStore()
+    store.reserve("spark-1", "admin", gb_requested=50.0, duration_s=3600,
+                  purpose="cluster-tracked")
+
+    merged = apply_cluster_reservations_to_view(view, store)
+    merged_node = merged.nodes["spark-1"]
+    # Before: 0 reservations, free = 128 - max(10, 0) = 118
+    # After: 1 cluster reservation (50 GB), free = 128 - max(10, 50) = 78
+    assert len(merged_node.active_reservations) == 1
+    assert merged_node.reserved_gb == 50.0
+    assert merged_node.free_gb_after_reservations == 78.0
+
+
+def test_apply_cluster_reservations_passes_through_when_empty():
+    """No cluster reservations → view returned unchanged."""
+    n = NodeGpuView(
+        node_id="spark-1", friendly_name="spark-1",
+        snapshot=_snap(total_mib=128*1024),
+        declared_total_gb=128.0,
+    )
+    view = ClusterGpuView(
+        snapshot_ts=datetime.now(timezone.utc),
+        nodes={"spark-1": n},
+    )
+    store = ClusterReservationStore()
+    merged = apply_cluster_reservations_to_view(view, store)
+    assert merged.nodes["spark-1"].active_reservations == []
+
+
+def test_cluster_reservation_roundtrip_json():
+    now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc)
+    res = ClusterReservation(
+        reservation_id="abc",
+        chosen_node_id="spark-1",
+        user="admin",
+        gb_requested=60.0,
+        started_at=now,
+        expires_at=now + timedelta(hours=1),
+        purpose="LoRA",
+    )
+    back = ClusterReservation.from_json(res.to_json())
+    assert back == res
+
+
+# ---------------------------------------------------------------------------
+# Service endpoints — v0.0.7 #44
+# ---------------------------------------------------------------------------
+
+
+def test_service_post_gpu_reserve_creates_real_reservation():
+    from fastapi.testclient import TestClient
+    from mesh.service import create_mesh_app
+    app = create_mesh_app()
+    client = TestClient(app)
+
+    # Without node_id + no heartbeats → no eligible node → 409
+    r = client.post("/gpu/reserve", json={"gb_requested": 10, "duration_s": 60})
+    assert r.status_code == 409
+    # With explicit node_id → reservation created
+    r = client.post("/gpu/reserve", json={
+        "node_id": "spark-1",
+        "gb_requested": 10,
+        "duration_s": 60,
+        "user": "admin",
+        "purpose": "test",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["chosen_node_id"] == "spark-1"
+    assert body["gb_requested"] == 10
+    assert body["user"] == "admin"
+    rid = body["reservation_id"]
+
+    # GET /gpu/reservations should include it
+    r = client.get("/gpu/reservations")
+    assert r.status_code == 200
+    rids = [x["reservation_id"] for x in r.json()["reservations"]]
+    assert rid in rids
+
+    # DELETE releases it
+    r = client.delete(f"/gpu/reserve/{rid}")
+    assert r.status_code == 200
+    # Second delete → 404
+    r = client.delete(f"/gpu/reserve/{rid}")
+    assert r.status_code == 404
+
+
+def test_service_post_gpu_reserve_rejects_invalid_input():
+    from fastapi.testclient import TestClient
+    from mesh.service import create_mesh_app
+    client = TestClient(create_mesh_app())
+    # Missing gb_requested → 400
+    r = client.post("/gpu/reserve", json={"duration_s": 60, "node_id": "n"})
+    assert r.status_code == 400
+    # Zero duration → 400
+    r = client.post("/gpu/reserve", json={"gb_requested": 10, "duration_s": 0, "node_id": "n"})
+    assert r.status_code == 400
+
+
+def test_service_get_gpu_cluster_includes_reservations():
+    from fastapi.testclient import TestClient
+    from mesh.service import create_mesh_app
+    client = TestClient(create_mesh_app())
+    # Create a reservation
+    r = client.post("/gpu/reserve", json={
+        "node_id": "spark-1", "gb_requested": 10, "duration_s": 60,
+    })
+    assert r.status_code == 200
+    rid = r.json()["reservation_id"]
+    # Cluster view should list it
+    r = client.get("/gpu/cluster")
+    assert r.status_code == 200
+    cr = r.json()["cluster_reservations"]
+    assert any(x["reservation_id"] == rid for x in cr)

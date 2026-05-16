@@ -310,10 +310,183 @@ def _deserialize_snapshot(d: dict) -> GpuSnapshot:
     )
 
 
+# ---------------------------------------------------------------------------
+# Cluster reservation store — v0.0.7 #44
+# ---------------------------------------------------------------------------
+
+
+import secrets as _secrets
+import threading as _threading
+from datetime import timedelta as _timedelta
+
+
+@dataclass
+class ClusterReservation:
+    """A cluster-wide reservation tracked centrally by the registry.
+
+    Different from `mesh.gpu.reservations.Reservation` (local-only,
+    file-based per-node). Lives in-memory on the registry process,
+    references a chosen_node_id, contributes to that node's reserved_gb
+    in the cluster view until expiry or release.
+
+    v0.0.7 ships intent-tracking + view-merge. v0.0.8 (mac-side) wires
+    the heartbeat-pull fan-out so the chosen node materializes a local
+    Reservation in its own ReservationStore.
+    """
+
+    reservation_id: str
+    chosen_node_id: str
+    user: str
+    gb_requested: float
+    started_at: datetime
+    expires_at: datetime
+    purpose: str = ""
+
+    def to_json(self) -> dict:
+        return {
+            "reservation_id": self.reservation_id,
+            "chosen_node_id": self.chosen_node_id,
+            "user": self.user,
+            "gb_requested": self.gb_requested,
+            "started_at": self.started_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+            "purpose": self.purpose,
+        }
+
+    @classmethod
+    def from_json(cls, d: dict) -> "ClusterReservation":
+        return cls(
+            reservation_id=d["reservation_id"],
+            chosen_node_id=d["chosen_node_id"],
+            user=d["user"],
+            gb_requested=d["gb_requested"],
+            started_at=datetime.fromisoformat(d["started_at"]),
+            expires_at=datetime.fromisoformat(d["expires_at"]),
+            purpose=d.get("purpose", ""),
+        )
+
+    @property
+    def is_expired(self) -> bool:
+        return datetime.now(timezone.utc) >= self.expires_at
+
+    @property
+    def remaining_s(self) -> float:
+        return max(0.0, (self.expires_at - datetime.now(timezone.utc)).total_seconds())
+
+
+class ClusterReservationStore:
+    """In-memory store of cluster-wide reservations. Thread-safe.
+
+    Auto-prunes expired reservations on every read. v0.0.7 ships
+    in-memory only; restart loses state. v0.0.8+ will optionally
+    persist alongside the event log.
+    """
+
+    def __init__(self) -> None:
+        self._reservations: dict[str, ClusterReservation] = {}
+        self._lock = _threading.Lock()
+
+    def __len__(self) -> int:
+        return len(self.list_active())
+
+    def reserve(
+        self,
+        chosen_node_id: str,
+        user: str,
+        gb_requested: float,
+        duration_s: float,
+        purpose: str = "",
+        now: Optional[datetime] = None,
+    ) -> ClusterReservation:
+        if gb_requested <= 0:
+            raise ValueError("gb_requested must be > 0")
+        if duration_s <= 0:
+            raise ValueError("duration_s must be > 0")
+        now = now or datetime.now(timezone.utc)
+        res = ClusterReservation(
+            reservation_id=_secrets.token_hex(6),
+            chosen_node_id=chosen_node_id,
+            user=user,
+            gb_requested=gb_requested,
+            started_at=now,
+            expires_at=now + _timedelta(seconds=duration_s),
+            purpose=purpose,
+        )
+        with self._lock:
+            self._reservations[res.reservation_id] = res
+        return res
+
+    def release(self, reservation_id: str) -> bool:
+        with self._lock:
+            return self._reservations.pop(reservation_id, None) is not None
+
+    def get(self, reservation_id: str) -> Optional[ClusterReservation]:
+        with self._lock:
+            return self._reservations.get(reservation_id)
+
+    def list_active(self, now: Optional[datetime] = None) -> list[ClusterReservation]:
+        now = now or datetime.now(timezone.utc)
+        with self._lock:
+            expired = [rid for rid, r in self._reservations.items() if now >= r.expires_at]
+            for rid in expired:
+                del self._reservations[rid]
+            return list(self._reservations.values())
+
+    def total_for_node(self, node_id: str, now: Optional[datetime] = None) -> float:
+        return sum(
+            r.gb_requested
+            for r in self.list_active(now=now)
+            if r.chosen_node_id == node_id
+        )
+
+
+def apply_cluster_reservations_to_view(
+    view: ClusterGpuView,
+    store: ClusterReservationStore,
+) -> ClusterGpuView:
+    """Return new view where each NodeGpuView's active_reservations
+    is extended with cluster reservations targeting that node.
+
+    Used by GET /gpu/cluster so per-node free_gb_after_reservations
+    reflects BOTH local file-based AND cluster-tracked reservations.
+    """
+    cluster_by_node: dict[str, list[Reservation]] = {}
+    for r in store.list_active():
+        cluster_by_node.setdefault(r.chosen_node_id, []).append(
+            Reservation(
+                reservation_id=r.reservation_id,
+                user=r.user,
+                hostname=r.chosen_node_id,
+                gb_requested=r.gb_requested,
+                started_at=r.started_at,
+                expires_at=r.expires_at,
+                purpose=r.purpose,
+            )
+        )
+    new_nodes: dict[str, NodeGpuView] = {}
+    for nid, n in view.nodes.items():
+        extra = cluster_by_node.get(nid, [])
+        if extra:
+            new_nodes[nid] = NodeGpuView(
+                node_id=n.node_id,
+                friendly_name=n.friendly_name,
+                snapshot=n.snapshot,
+                active_reservations=list(n.active_reservations) + extra,
+                declared_total_gb=n.declared_total_gb,
+                hardware_tags=list(n.hardware_tags),
+            )
+        else:
+            new_nodes[nid] = n
+    return ClusterGpuView(snapshot_ts=view.snapshot_ts, nodes=new_nodes)
+
+
 __all__ = [
     "ClusterGpuView",
+    "ClusterReservation",
+    "ClusterReservationStore",
     "NodeGpuView",
     "PlacementResult",
+    "apply_cluster_reservations_to_view",
     "build_cluster_view_from_heartbeats",
     "filter_nodes_by_memory",
     "pick_best_node",
