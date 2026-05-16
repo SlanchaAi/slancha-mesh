@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "slancha-mesh"
-version = "0.0.5"
+version = "0.0.6"
 description = "Mesh of specialist small models on user hardware, fronted by Slancha's classifier-driven router."
 readme = "README.md"
 license = {text = "Apache-2.0"}
