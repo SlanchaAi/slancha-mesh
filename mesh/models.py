@@ -126,10 +126,23 @@ class SpecialistCard(_Frozen):
 
 
 class NodeSuggestion(_Frozen):
-    """Per-spec §3.3: what the allocator tells a node to host."""
+    """Per-spec §3.3: what the allocator tells a node to host.
+
+    `primary` is the always-loaded specialist on the node. `secondaries`
+    are additional specialists the allocator decides this node can also
+    host concurrently — populated only when the node's effective memory
+    has 2× headroom past primary's runtime budget. Each secondary gets
+    its own backend on its own port (heartbeat reports all loaded).
+
+    Why `secondaries` lives alongside `alternates` rather than replacing:
+    - `alternates`: ranked fallbacks if primary fails to load (one-of-many)
+    - `secondaries`: also-loaded concurrent specialists (all-load-together)
+    Different semantic; concurrent coexistence requires both fields.
+    """
 
     node_id: NodeId
     primary: SpecialistCard | None  # None = registry-only node (no inference)
+    secondaries: list[SpecialistCard] = Field(default_factory=list)
     alternates: list[SpecialistCard] = Field(default_factory=list)
     rationale: str = ""
     sticky: bool = False
