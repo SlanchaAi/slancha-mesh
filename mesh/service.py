@@ -204,7 +204,176 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
     def get_health() -> HealthResponse:
         return HealthResponse(status="ok", auth_required=_expected_token() is not None)
 
+    # ------------------------------------------------------------------
+    # v0.0.6 — cluster-wide GPU coordination (#46)
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/gpu/cluster",
+        summary="Aggregate GPU state across all mesh nodes",
+    )
+    def get_gpu_cluster(
+        _: Annotated[None, Depends(verify_node_token)],
+    ) -> dict:
+        """Returns a cluster GPU view assembled from the most-recent
+        heartbeat per node that carries a `gpu` payload. Nodes without
+        a gpu field (non-GPU hosts, older clients) are omitted.
+
+        Shape (consumed by mesh.gpu.cluster.build_cluster_view_from_heartbeats):
+          {
+            "snapshot_ts": "<iso8601>",
+            "nodes": {
+              "<node_id>": {
+                "friendly_name": str,
+                "snapshot": {...GpuSnapshot serialized...},
+                "reservations": [...Reservation serialized...],
+                "declared_total_gb": float | null,
+                "hardware_tags": [str, ...],
+                "free_gb_after_reservations": float | null,
+                "used_gb": float,
+                "reserved_gb": float
+              }
+            }
+          }
+        """
+        from mesh.gpu.cluster import build_cluster_view_from_heartbeats
+        from mesh.registry import HeartbeatEvent
+
+        # Walk the event log for the most-recent heartbeat per node.
+        latest: dict[str, dict] = {}
+        for ev in reg.events:
+            if isinstance(ev, HeartbeatEvent):
+                hb = ev.heartbeat
+                gpu = getattr(hb, "gpu", None)
+                if gpu is None:
+                    continue
+                latest[hb.node_id] = {
+                    "node_id": hb.node_id,
+                    "friendly_name": hb.hardware.friendly_name,
+                    "gpu": gpu,
+                }
+
+        view = build_cluster_view_from_heartbeats(list(latest.values()))
+        return {
+            "snapshot_ts": view.snapshot_ts.isoformat(),
+            "nodes": {
+                nid: {
+                    "friendly_name": n.friendly_name,
+                    "snapshot": _serialize_snapshot(n.snapshot),
+                    "reservations": [r.to_json() for r in n.active_reservations],
+                    "declared_total_gb": n.declared_total_gb,
+                    "hardware_tags": list(n.hardware_tags),
+                    "free_gb_after_reservations": n.free_gb_after_reservations,
+                    "used_gb": n.used_gb,
+                    "reserved_gb": n.reserved_gb,
+                }
+                for nid, n in view.nodes.items()
+            },
+            "total_free_gb": view.total_free_gb,
+            "total_used_gb": view.total_used_gb,
+            "total_reserved_gb": view.total_reserved_gb,
+        }
+
+    @app.post(
+        "/gpu/reserve",
+        summary="Cluster-aware GPU reservation (registers intent)",
+    )
+    def post_gpu_reserve(
+        body: dict,
+        _: Annotated[None, Depends(verify_node_token)],
+    ) -> dict:
+        """Register a cluster-level reservation intent.
+
+        Body: {node_id?, gb_requested, duration_s, purpose?, hardware_tags?}
+
+        If node_id provided, the reservation is recorded as "intended for
+        that node" and SHOULD be claimed via `mesh-gpu reserve` on that
+        node within the duration window. If omitted, the registry picks
+        best-fit + returns the chosen node_id; caller is expected to ssh
+        to that node + claim locally.
+
+        This is a CLUSTER-LEVEL intent; the actual GPU memory hold lives
+        in the chosen node's local ReservationStore. The registry tracks
+        outstanding intents for visibility but doesn't enforce them at
+        the kernel.
+        """
+        from mesh.gpu.cluster import build_cluster_view_from_heartbeats, pick_best_node
+        from mesh.registry import HeartbeatEvent
+
+        # Rebuild view from heartbeats
+        latest: dict[str, dict] = {}
+        for ev in reg.events:
+            if isinstance(ev, HeartbeatEvent):
+                hb = ev.heartbeat
+                gpu = getattr(hb, "gpu", None)
+                if gpu is None:
+                    continue
+                latest[hb.node_id] = {
+                    "node_id": hb.node_id,
+                    "friendly_name": hb.hardware.friendly_name,
+                    "gpu": gpu,
+                }
+        view = build_cluster_view_from_heartbeats(list(latest.values()))
+
+        gb = float(body.get("gb_requested", 0))
+        if gb <= 0:
+            raise HTTPException(status_code=400, detail="gb_requested must be > 0")
+
+        target_node = body.get("node_id")
+        require_tags = body.get("hardware_tags")
+
+        if target_node is None:
+            result = pick_best_node(
+                view, gb_requested=gb, require_hardware_tags=require_tags,
+            )
+            if not result.ok:
+                raise HTTPException(
+                    status_code=409, detail={
+                        "reason": result.reason,
+                        "rejected": result.rejected,
+                    },
+                )
+            target_node = result.chosen_node_id
+
+        # v0.0.6: respond with the chosen target + remind caller to claim
+        # locally. v0.0.7 will POST the reservation through to the chosen
+        # node's local store via the mesh substrate (libp2p or HTTP fanout).
+        return {
+            "chosen_node_id": target_node,
+            "gb_requested": gb,
+            "duration_s": body.get("duration_s"),
+            "claim_command": (
+                f"ssh {target_node} -- mesh-gpu reserve "
+                f"--gb {gb} --duration {body.get('duration_s', 3600)}s "
+                f"--purpose {body.get('purpose', '')!r}"
+            ),
+            "note": "v0.0.6 returns intent only; v0.0.7 will fan out to node",
+        }
+
     return app
+
+
+def _serialize_snapshot(snap) -> dict:
+    """Inverse of mesh.gpu.cluster._deserialize_snapshot."""
+    return {
+        "probed_at": snap.probed_at.isoformat(),
+        "util_pct": snap.util_pct,
+        "mem_used_mib": snap.mem_used_mib,
+        "mem_free_mib": snap.mem_free_mib,
+        "mem_total_mib": snap.mem_total_mib,
+        "nvidia_smi_available": snap.nvidia_smi_available,
+        "processes": [
+            {
+                "pid": p.pid,
+                "process_name": p.process_name,
+                "used_memory_mib": p.used_memory_mib,
+                "user": p.user,
+                "cmdline": p.cmdline,
+                "runtime_s": p.runtime_s,
+            }
+            for p in snap.processes
+        ],
+    }
 
 
 # Convenience module-level app for `uvicorn mesh.service:app`.

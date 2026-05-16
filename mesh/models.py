@@ -175,7 +175,18 @@ class NetworkLink(_Frozen):
 
 
 class NodeHeartbeat(_Frozen):
-    """Per spec §5. Posted to `POST /mesh/v1/heartbeat` every ~5s."""
+    """Per spec §5. Posted to `POST /mesh/v1/heartbeat` every ~5s.
+
+    `gpu` field (v0.0.6) carries cluster-wide GPU coordination payload:
+    nvidia-smi snapshot + active local reservations + declared total
+    + hardware tags. Optional + omitted on non-GPU nodes. Registry
+    aggregates these into the cluster GPU view served at /gpu/cluster.
+
+    Field shape (intentionally loose dict so this module stays decoupled
+    from mesh.gpu — production callers serialize via
+    GpuHeartbeatExtension below; mesh.gpu.cluster.build_cluster_view_from_heartbeats
+    parses the dict back into typed objects).
+    """
 
     node_id: NodeId
     ts: datetime
@@ -185,6 +196,7 @@ class NodeHeartbeat(_Frozen):
     recent_throughput: dict[ModelId, float] = Field(default_factory=dict)
     health: HealthState = "healthy"
     network_view: dict[NodeId, NetworkLink] = Field(default_factory=dict)
+    gpu: dict | None = None  # v0.0.6: cluster GPU coordination payload
 
 
 # ---------------------------------------------------------------------------
