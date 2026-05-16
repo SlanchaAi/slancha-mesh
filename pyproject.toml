@@ -24,6 +24,9 @@ dependencies = [
 serve = [
   "vllm>=0.17",
 ]
+dashboard = [
+  "streamlit>=1.30",
+]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
