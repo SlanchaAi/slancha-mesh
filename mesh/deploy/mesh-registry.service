@@ -1,0 +1,57 @@
+[Unit]
+Description=Slancha-Mesh registry HTTP service
+Documentation=https://github.com/SlanchaAi/slancha-mesh/blob/main/docs/SLANCHA_MESH_V0_SPEC.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Bind config — defaults match what slancha-api's mesh_client + nightly
+# smoke + dashboard all expect (127.0.0.1:8088). Override via
+# `systemctl --user edit` for a different port or to expose externally
+# behind a tunnel.
+Environment="MESH_REGISTRY_HOST=127.0.0.1"
+Environment="MESH_REGISTRY_PORT=8088"
+
+# Auth: if SLANCHA_NODE_TOKEN is set in the environment when the unit is
+# enabled (e.g., via `systemctl --user set-environment`), every endpoint
+# except /health requires Bearer auth. Unset = dev mode, no auth.
+# We don't hardcode the token here; secrets stay out of unit files.
+
+# slancha-mesh is dev-installed from source. WorkingDirectory +
+# PYTHONPATH point at the checkout so `uvicorn mesh.service:app` resolves.
+WorkingDirectory=%h/Source/slancha-mesh
+Environment="PYTHONPATH=%h/Source/slancha-mesh"
+
+# Bind to MESH_REGISTRY_HOST only. The registry is the routing-decision
+# control plane; expose externally via a separate tunnel unit if needed
+# (e.g., for multi-host meshes), but the default is local-only.
+ExecStart=/usr/bin/env uvicorn mesh.service:app \
+    --host ${MESH_REGISTRY_HOST} \
+    --port ${MESH_REGISTRY_PORT} \
+    --log-level info \
+    --no-access-log
+
+# uvicorn handles SIGTERM cleanly; give it 10s for in-flight requests.
+TimeoutStopSec=10
+KillMode=mixed
+
+# Restart on crash with backoff. The registry is in-memory (event-sourced
+# log + snapshot replay); state is rebuilt from heartbeats within ~5s of
+# restart. No on-disk persistence yet (spec §3 lists it out of scope for
+# v0.x.y), so restart is cheap.
+Restart=on-failure
+RestartSec=10
+
+# Sandboxing — same posture as the other v0.0.5 deploy units.
+# ProtectHome=read-only would block importing the source checkout;
+# tmpfs gives a private home with explicit bind-mount whitelisting.
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=tmpfs
+BindReadOnlyPaths=%h/Source/slancha-mesh
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
