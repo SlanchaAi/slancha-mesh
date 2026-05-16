@@ -1,0 +1,41 @@
+# Example cloudflared config for the mesh-dashboard named tunnel.
+#
+# This file is a TEMPLATE — copy to ~/.cloudflared/mesh-dashboard-config.yml
+# (or wherever the tunnel-creating user stored credentials), edit the UUID,
+# then point the systemd unit at the right tunnel name.
+#
+# Provisioning steps (one-time, per global CLAUDE.md uplink protocol):
+#   1. Pick the subdomain: evals.laulpogan.com
+#   2. Create the named tunnel + DNS route:
+#        ~/.local/bin/cloudflared tunnel create mesh-dashboard
+#        ~/.local/bin/cloudflared tunnel route dns mesh-dashboard evals.laulpogan.com
+#   3. The create step prints a tunnel UUID and a credentials file path
+#        ~/.cloudflared/<UUID>.json — note both.
+#   4. Copy this file → ~/.cloudflared/mesh-dashboard-config.yml; edit:
+#        - tunnel: the UUID from step 3
+#        - credentials-file: the path from step 3
+#   5. Install the user-systemd units (mesh-dashboard.service +
+#      mesh-dashboard-tunnel.service) via install_dashboard.sh.
+#   6. First-boot SSL cert provisioning takes ~30s-15min; poll until
+#      https://evals.laulpogan.com responds 200.
+
+tunnel: REPLACE-WITH-UUID-FROM-cloudflared-tunnel-create
+credentials-file: /home/REPLACE-WITH-USERNAME/.cloudflared/REPLACE-WITH-UUID.json
+
+ingress:
+  # The dashboard's streamlit unit binds to 127.0.0.1:8501. Cloudflared
+  # tunnels external traffic to the local socket; LAN exposure is
+  # intentionally blocked.
+  - hostname: evals.laulpogan.com
+    service: http://127.0.0.1:8501
+    originRequest:
+      # Streamlit websockets need a longer keepalive than the cloudflared
+      # default (otherwise the live dashboard reload triggers reconnect
+      # storms).
+      connectTimeout: 30s
+      tlsTimeout: 10s
+      keepAliveConnections: 4
+      keepAliveTimeout: 90s
+  # Default rule (REQUIRED — cloudflared rejects configs without a
+  # terminal catch-all).
+  - service: http_status:404

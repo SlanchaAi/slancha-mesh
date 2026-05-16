@@ -1,0 +1,25 @@
+[Unit]
+Description=Slancha-Mesh Cloudflare tunnel for evals.laulpogan.com
+Documentation=https://github.com/SlanchaAi/slancha-mesh/blob/main/docs/SLANCHA_MESH_V0_SPEC.md
+After=network-online.target mesh-dashboard.service
+Wants=network-online.target
+Requires=mesh-dashboard.service
+
+[Service]
+Type=simple
+
+# Path matches the global CLAUDE.md uplink pattern (forge.laulpogan.com
+# unit as reference). Adjust if cloudflared lives elsewhere.
+ExecStart=%h/.local/bin/cloudflared tunnel run mesh-dashboard
+
+# Cloudflared handles its own backoff on edge disconnects; we restart on
+# fall-through (e.g., binary crash) after 15s.
+Restart=on-failure
+RestartSec=15
+
+# Cloudflared needs network egress; intentionally no PrivateNetwork.
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

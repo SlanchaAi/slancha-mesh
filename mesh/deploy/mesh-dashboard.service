@@ -1,0 +1,46 @@
+[Unit]
+Description=Slancha-Mesh Streamlit replay dashboard
+Documentation=https://github.com/SlanchaAi/slancha-mesh/blob/main/docs/SLANCHA_MESH_V0_SPEC.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Replay JSONL the dashboard renders. install_dashboard.sh sets this to
+# the rolling nightly-smoke history; override via `systemctl --user edit`.
+Environment="MESH_DASHBOARD_REPLAY=%S/slancha-mesh/replay-history/latest.jsonl"
+Environment="MESH_DASHBOARD_PORT=8501"
+
+# Bind to 127.0.0.1 only. External exposure is handled by the
+# mesh-dashboard-tunnel.service (cloudflared); LAN reach is intentionally
+# blocked so the only ingress path is through Cloudflare's edge.
+ExecStart=/usr/bin/env streamlit run \
+    %h/Source/slancha-mesh/mesh/dashboard/streamlit_app.py \
+    --server.address 127.0.0.1 \
+    --server.port ${MESH_DASHBOARD_PORT} \
+    --server.headless true \
+    --browser.gatherUsageStats false \
+    -- \
+    --replay ${MESH_DASHBOARD_REPLAY}
+
+# Streamlit responds to SIGTERM cleanly; give it 10s to flush before kill.
+TimeoutStopSec=10
+KillMode=mixed
+
+# Restart on crash, but back off to avoid rapid-fire loops.
+Restart=on-failure
+RestartSec=15
+
+# Sandboxing — same posture as the nightly-smoke unit.
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=true
+
+# Read access to the replay-history dir is needed even with ProtectHome=read-only;
+# %S resolves to $XDG_STATE_HOME which is under $HOME on most setups.
+ReadOnlyPaths=%S/slancha-mesh
+
+[Install]
+WantedBy=default.target
