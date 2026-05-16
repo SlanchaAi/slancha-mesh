@@ -271,3 +271,134 @@ def test_drift_report_dataclass_shape():
 
 def test_default_alert_threshold_pct_is_ten():
     assert DEFAULT_ALERT_THRESHOLD_PCT == 10.0
+
+
+# ---------------------------------------------------------------------------
+# M2 — per-domain drift + fallback-shape KL
+# ---------------------------------------------------------------------------
+
+
+from mesh.scripts.nightly_smoke import (  # noqa: E402 — keep grouped with M2 tests
+    DEFAULT_KL_THRESHOLD,
+    DEFAULT_PER_DOMAIN_THRESHOLD_PCT,
+    PER_DOMAIN_MIN_SAMPLES,
+    _fallback_shape_distribution,
+    _kl_divergence,
+    _per_domain_hit_rates,
+)
+
+
+def test_per_domain_hit_rates_groups_correctly():
+    recs = [
+        _rec("p1", mesh_hit=True, domain="code"),
+        _rec("p2", mesh_hit=True, domain="code"),
+        _rec("p3", mesh_hit=False, domain="code"),
+        _rec("p4", mesh_hit=False, domain="math"),
+    ]
+    out = _per_domain_hit_rates(recs)
+    assert out["code"] == (2 / 3, 3)
+    assert out["math"] == (0.0, 1)
+
+
+def test_per_domain_hit_rates_empty():
+    assert _per_domain_hit_rates([]) == {}
+
+
+def test_fallback_shape_distribution_sums_to_one():
+    recs = [
+        _rec("p1", mesh_hit=False, domain="code"),
+        _rec("p2", mesh_hit=False, domain="code"),
+        _rec("p3", mesh_hit=False, domain="math"),
+    ]
+    dist = _fallback_shape_distribution(recs)
+    assert abs(sum(dist.values()) - 1.0) < 1e-9
+
+
+def test_fallback_shape_distribution_empty():
+    assert _fallback_shape_distribution([]) == {}
+
+
+def test_kl_divergence_identical_distributions_is_zero():
+    d = {"a": 0.5, "b": 0.5}
+    assert _kl_divergence(d, d) == 0.0
+
+
+def test_kl_divergence_disjoint_distributions_positive():
+    p = {"a": 1.0}
+    q = {"b": 1.0}
+    assert _kl_divergence(p, q) > 0.0
+
+
+def test_kl_divergence_empty_inputs_zero():
+    assert _kl_divergence({}, {}) == 0.0
+
+
+def test_drift_per_domain_alerts_when_one_domain_collapses(monkeypatch):
+    """Aggregate hit-rate stable, but one domain's hit-rate collapses → alert."""
+    today = (
+        [_rec(f"c{i}", mesh_hit=True, domain="code") for i in range(10)]
+        + [_rec(f"m{i}", mesh_hit=False, domain="math") for i in range(10)]
+    )
+    prior = (
+        [_rec(f"c{i}", mesh_hit=True, domain="code") for i in range(10)]
+        + [_rec(f"m{i}", mesh_hit=True, domain="math") for i in range(10)]
+    )
+    # Aggregate: today=50%, prior=100% → 50pp drop. That hits the aggregate
+    # alert too; but we also assert the per-domain detail.
+    report = detect_drift(today, prior, alert_threshold_pct=99.0)  # aggregate disabled
+    assert report.alert is True
+    assert any("per-domain drift" in r and "math" in r for r in report.reasons)
+    assert report.per_domain_drift["code"] == 0.0
+    assert report.per_domain_drift["math"] == -100.0
+    # New-fallback-domain signal independently fires
+    assert "math" in report.new_fallback_domains
+
+
+def test_drift_per_domain_skips_small_sample_domains():
+    """Domain with <PER_DOMAIN_MIN_SAMPLES samples doesn't trigger alert."""
+    # 4 samples in code: below threshold → noise floor protection
+    today = [_rec(f"c{i}", mesh_hit=False, domain="code") for i in range(4)]
+    prior = [_rec(f"c{i}", mesh_hit=True, domain="code") for i in range(4)]
+    report = detect_drift(today, prior, alert_threshold_pct=99.0)
+    # per_domain_drift is reported regardless (for visibility), but no
+    # per-domain alert reason fires because samples < threshold.
+    assert report.per_domain_drift["code"] == -100.0
+    assert not any("per-domain drift" in r for r in report.reasons)
+
+
+def test_drift_fallback_shape_kl_alerts_on_distribution_shift():
+    """All-cloud yesterday → all-cloud-via-different-shape today → KL > threshold."""
+    prior = [_rec(f"p{i}", mesh_hit=False, domain="code") for i in range(20)]
+    # Today: same domain falls back BUT via a different chain shape
+    today_recs: list[dict] = []
+    for i in range(20):
+        rec = _rec(f"t{i}", mesh_hit=False, domain="code")
+        # Override the fallback chain to a distinct shape
+        rec["decision"]["fallback_chain"] = [["new-model", None]]
+        today_recs.append(rec)
+    report = detect_drift(today_recs, prior, alert_threshold_pct=99.0)
+    assert report.fallback_shape_kl > DEFAULT_KL_THRESHOLD
+    assert any("fallback-shape KL" in r for r in report.reasons)
+    assert report.alert is True
+
+
+def test_drift_fallback_shape_kl_stable_no_alert():
+    """Identical shape distributions → KL ≈ 0 → no alert from this signal."""
+    recs = [_rec(f"p{i}", mesh_hit=False, domain="code") for i in range(20)]
+    report = detect_drift(recs, recs, alert_threshold_pct=99.0)
+    assert report.fallback_shape_kl < DEFAULT_KL_THRESHOLD
+
+
+def test_drift_report_carries_m2_fields():
+    """First-night DriftReport always carries the M2 fields, defaulted."""
+    today = [_rec(f"p{i}", mesh_hit=(i < 7), domain="code") for i in range(10)]
+    report = detect_drift(today, prior=None)
+    assert "code" in report.per_domain_drift
+    assert report.per_domain_drift["code"] == 0.0  # no prior to drift from
+    assert report.fallback_shape_kl == 0.0
+
+
+def test_m2_thresholds_have_documented_defaults():
+    assert DEFAULT_PER_DOMAIN_THRESHOLD_PCT == 10.0
+    assert DEFAULT_KL_THRESHOLD == 0.3
+    assert PER_DOMAIN_MIN_SAMPLES == 5
