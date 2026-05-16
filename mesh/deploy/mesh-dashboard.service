@@ -12,6 +12,12 @@ Type=simple
 Environment="MESH_DASHBOARD_REPLAY=%S/slancha-mesh/replay-history/latest.jsonl"
 Environment="MESH_DASHBOARD_PORT=8501"
 
+# slancha-mesh is dev-installed from source; systemd runs from / without
+# carrying PYTHONPATH or cwd. Set both so streamlit can import the mesh
+# package. Override via `systemctl --user edit` if the checkout is elsewhere.
+WorkingDirectory=%h/Source/slancha-mesh
+Environment="PYTHONPATH=%h/Source/slancha-mesh"
+
 # Bind to 127.0.0.1 only. External exposure is handled by the
 # mesh-dashboard-tunnel.service (cloudflared); LAN reach is intentionally
 # blocked so the only ingress path is through Cloudflare's edge.
@@ -32,15 +38,19 @@ KillMode=mixed
 Restart=on-failure
 RestartSec=15
 
-# Sandboxing — same posture as the nightly-smoke unit.
+# Sandboxing — mirrors the mesh-nightly-smoke posture (spark-v005-nightly-install-fix).
+# ProtectHome=read-only would block streamlit from importing the source
+# checkout; ProtectHome=tmpfs gives a private view of $HOME and the explicit
+# BindReadOnlyPaths whitelists ONLY the slancha-mesh checkout.
 PrivateTmp=true
 ProtectSystem=full
-ProtectHome=read-only
+ProtectHome=tmpfs
+BindReadOnlyPaths=%h/Source/slancha-mesh
 NoNewPrivileges=true
 
-# Read access to the replay-history dir is needed even with ProtectHome=read-only;
-# %S resolves to $XDG_STATE_HOME which is under $HOME on most setups.
-ReadOnlyPaths=%S/slancha-mesh
+# Replay-history dir lives under XDG_STATE_HOME and needs to be readable;
+# expose it via BindReadOnlyPaths since ProtectHome=tmpfs hides it by default.
+BindReadOnlyPaths=%S/slancha-mesh
 
 [Install]
 WantedBy=default.target
