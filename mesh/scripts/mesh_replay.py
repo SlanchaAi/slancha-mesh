@@ -157,6 +157,77 @@ def replay_one(
     }
 
 
+def render_summary_markdown(jsonl_path: Path) -> str:
+    """Build a human-readable markdown summary of a replay JSONL.
+
+    Reuses the dashboard.panels stats helpers so a CLI summary matches
+    what the streamlit dashboard would render for the same data. Goal:
+    the morning-after eyeball check on a nightly run becomes a single
+    `cat` of this file rather than a JSONL grep.
+
+    Sections:
+      - Header: source path + total decisions
+      - Top stats: mesh-hit count + rate + mean queue (mesh-hit rows)
+      - Top fallback shapes (descending by count, capped at 10)
+      - Per-specialist invocation counts table
+
+    Returns the markdown as a string. Caller writes it to disk.
+    """
+    # Imported lazily so this module doesn't always pay the dashboard
+    # import cost when --summary-md is not used.
+    from mesh.dashboard.panels import (
+        fallback_chain_shape_histogram,
+        load_replay_records,
+        per_specialist_invocation_counts,
+        summary_stats,
+    )
+
+    records = load_replay_records(jsonl_path)
+    stats = summary_stats(records)
+    shapes = fallback_chain_shape_histogram(records)
+    invocations = per_specialist_invocation_counts(records, include_cloud=True)
+
+    lines: list[str] = []
+    lines.append(f"# Mesh Replay Summary")
+    lines.append("")
+    lines.append(f"Source: `{jsonl_path}`  ({stats['total']} decisions)")
+    lines.append("")
+    lines.append("## Top Stats")
+    lines.append("")
+    lines.append(f"- Mesh hits: **{stats['mesh_hits']} / {stats['total']}** ({stats['mesh_hit_rate']:.0%})")
+    lines.append(f"- Cloud fallbacks: {stats['cloud_fallbacks']}")
+    lines.append(f"- Distinct specialists: {stats['distinct_specialists']}")
+    lines.append(f"- Distinct nodes: {stats['distinct_nodes']}")
+    lines.append(f"- Mean queue (mesh-hit rows): {stats['mean_queue_ms']:.0f} ms")
+    lines.append("")
+
+    if shapes:
+        lines.append("## Top Fallback Chain Shapes")
+        lines.append("")
+        lines.append("| Count | Shape |")
+        lines.append("|-----:|-------|")
+        for shape, count in shapes[:10]:
+            shape_escaped = shape.replace("|", "\\|")
+            lines.append(f"| {count} | `{shape_escaped}` |")
+        lines.append("")
+
+    if invocations:
+        lines.append("## Per-Specialist Invocations")
+        lines.append("")
+        all_domains = sorted({d for row in invocations.values() for d in row})
+        if all_domains:
+            header = "| specialist | " + " | ".join(all_domains) + " |"
+            sep = "|" + "|".join(["---:"] * (len(all_domains) + 1)) + "|"
+            lines.append(header)
+            lines.append(sep)
+            for spec in sorted(invocations):
+                cells = [str(invocations[spec].get(d, 0)) for d in all_domains]
+                lines.append(f"| {spec} | " + " | ".join(cells) + " |")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 def replay_corpus(
     corpus_path: Path,
     output_path: Path,
@@ -164,6 +235,7 @@ def replay_corpus(
     token: str | None = None,
     cloud_fallback: str = "claude-sonnet-4-7",
     snapshot_refresh_every: int = 25,
+    summary_md_path: Path | None = None,
 ) -> dict[str, int]:
     """Drive the full corpus through the mesh; emit JSONL to `output_path`.
 
@@ -187,6 +259,10 @@ def replay_corpus(
             processed += 1
             if rec["decision"]["mesh_hit"]:
                 mesh_hits += 1
+
+    if summary_md_path is not None:
+        summary_md_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_md_path.write_text(render_summary_markdown(output_path), encoding="utf-8")
 
     return {
         "processed": processed,
@@ -221,6 +297,12 @@ def main(argv: list[str] | None = None) -> int:
         default=25,
         help="Re-fetch /registry every N prompts (default 25).",
     )
+    ap.add_argument(
+        "--summary-md",
+        type=Path,
+        default=None,
+        help="Also emit a human-readable markdown summary alongside the JSONL output.",
+    )
     args = ap.parse_args(argv)
 
     if not args.corpus.exists():
@@ -235,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         token=args.token,
         cloud_fallback=args.cloud_fallback,
         snapshot_refresh_every=args.snapshot_refresh_every,
+        summary_md_path=args.summary_md,
     )
     elapsed = time.time() - started
     print(
