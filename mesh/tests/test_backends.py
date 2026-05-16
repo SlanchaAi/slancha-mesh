@@ -7,7 +7,12 @@ real-serving integration is in `test_integration_vllm.py` behind a
 
 from __future__ import annotations
 
-from mesh.backends import NullBackend, VLLMBackend, _parse_vllm_metrics
+from mesh.backends import (
+    NullBackend,
+    VLLMBackend,
+    _needs_fp8_marlin_fallback,
+    _parse_vllm_metrics,
+)
 from mesh.models import SpecialistCard
 
 
@@ -60,6 +65,34 @@ def test_vllm_backend_stop_when_never_started_is_noop():
     be = VLLMBackend(card=_card(), port=9999)
     be.stop()  # should not raise
     assert not be.is_alive()
+
+
+def test_fp8_marlin_fallback_blackwell_consumer():
+    """sm_120 / sm_121 → flag set (no native cutlass FP8 GEMM in vLLM 0.17)."""
+    assert _needs_fp8_marlin_fallback("12.0") is True
+    assert _needs_fp8_marlin_fallback("12.1") is True
+
+
+def test_fp8_marlin_fallback_hopper_ada_native():
+    """Hopper / Ada have native FP8 kernels; forcing Marlin actively hurts perf."""
+    assert _needs_fp8_marlin_fallback("9.0") is False  # Hopper H100/H200
+    assert _needs_fp8_marlin_fallback("8.9") is False  # Ada L40/L4
+    assert _needs_fp8_marlin_fallback("8.0") is False  # Ampere A100
+
+
+def test_fp8_marlin_fallback_unknown_capability():
+    """Unknown / CPU host → don't force Marlin (default-off is the safer floor)."""
+    assert _needs_fp8_marlin_fallback(None) is False
+    assert _needs_fp8_marlin_fallback("") is False
+    assert _needs_fp8_marlin_fallback("13.0") is False  # future chip
+
+
+def test_vllm_backend_carries_cuda_capability_field():
+    """Field default is None; explicit value propagates to .start() env logic."""
+    be = VLLMBackend(card=_card(), port=8123)
+    assert be.cuda_capability is None
+    be2 = VLLMBackend(card=_card(), port=8124, cuda_capability="12.1")
+    assert be2.cuda_capability == "12.1"
 
 
 def test_null_backend_lifecycle():
