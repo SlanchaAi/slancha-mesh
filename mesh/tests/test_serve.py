@@ -63,6 +63,62 @@ def test_daemon_starts_and_heartbeats_with_null_backend():
     assert not be.is_alive()
 
 
+def test_daemon_serves_multiple_backends_on_distinct_ports():
+    """Multi-specialist coexistence (spec §3.3): GB10 with 128GB unified mem
+    runs code AND math/general simultaneously, each on its own port.
+
+    Heartbeat reports both specialists loaded; queue depth aggregates
+    across backends. Stopping the daemon stops both backends.
+    """
+    code_card = _card(spec_id="qwen3-coder-30b-a3b-fp8", domain="code")
+    math_card = _card(spec_id="qwen3-math-7b-q4", domain="math")
+    be_code = NullBackend(card=code_card, base_url="http://127.0.0.1:8001")
+    be_math = NullBackend(card=math_card, base_url="http://127.0.0.1:8002")
+
+    daemon = ServeDaemon(backends=[be_code, be_math], probe=_probe())
+    assert daemon.start(wait_ready=True, ready_timeout=1.0)
+
+    hb = daemon.heartbeat()
+    loaded_ids = {lm.specialist_id for lm in hb.loaded_models}
+    assert loaded_ids == {"qwen3-coder-30b-a3b-fp8", "qwen3-math-7b-q4"}
+    assert hb.health == "healthy"
+
+    # Both backends still alive
+    assert be_code.is_alive()
+    assert be_math.is_alive()
+
+    daemon.stop()
+    assert not be_code.is_alive()
+    assert not be_math.is_alive()
+
+
+def test_daemon_partial_failure_keeps_surviving_backend():
+    """If one of two backends dies, daemon stays healthy on the survivor.
+
+    Spec §6.6 fallback contract: router falls through to next route in
+    chain on per-specialist failure. Daemon should NOT crash the whole
+    node when ONE backend dies — heartbeat reflects reduced capacity.
+    """
+    code_card = _card(spec_id="qwen3-coder-30b-a3b-fp8", domain="code")
+    math_card = _card(spec_id="qwen3-math-7b-q4", domain="math")
+    be_code = NullBackend(card=code_card, base_url="http://127.0.0.1:8001")
+    be_math = NullBackend(card=math_card, base_url="http://127.0.0.1:8002")
+
+    daemon = ServeDaemon(backends=[be_code, be_math], probe=_probe())
+    daemon.start(wait_ready=True, ready_timeout=1.0)
+
+    be_code.stop()  # simulate code-backend OOM mid-session
+
+    hb = daemon.heartbeat()
+    loaded_ids = {lm.specialist_id for lm in hb.loaded_models}
+    assert loaded_ids == {"qwen3-math-7b-q4"}, (
+        f"expected only math after code died; got {loaded_ids}"
+    )
+    assert hb.health == "healthy", "daemon should NOT mark whole node degraded on partial death"
+
+    daemon.stop()
+
+
 def test_daemon_heartbeat_degraded_when_no_backend_alive():
     """If a backend dies, the next heartbeat reports degraded — router falls through."""
     card = _card()
