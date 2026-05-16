@@ -63,6 +63,52 @@ def test_daemon_starts_and_heartbeats_with_null_backend():
     assert not be.is_alive()
 
 
+def test_daemon_idle_detector_reports_training_health_via_heartbeat():
+    """Spec §7 + ServeDaemon integration: when the detector transitions
+    to TRAINING, heartbeat.health flips to 'training' so the router
+    drops hot-interactive traffic.
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    from mesh.idle import IdleDetector
+    from mesh.models import NodeUtilization as _NU
+
+    card = _card()
+    be = NullBackend(card=card)
+    detector = IdleDetector()
+
+    # Drive detector to TRAINING via synthetic clock BEFORE wiring it to
+    # the daemon. heartbeat() calls observe() with real `now`, which would
+    # otherwise overwrite our synthetic _idle_since. The integration test
+    # boundary is "heartbeat reads detector.health()"; the state transition
+    # is unit-tested in test_idle.py.
+    anchor = _dt(2026, 5, 16, 12, 0, 0, tzinfo=_tz.utc)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor)
+    detector.observe(_NU(gpu_util_pct=0.0, queue_depth=0), anchor + _td(seconds=61))
+    assert detector.should_start_training()
+    detector.mark_training_started(anchor + _td(seconds=61))
+
+    daemon = ServeDaemon(backends=[be], probe=_probe(), idle_detector=detector)
+    daemon.start(wait_ready=True, ready_timeout=1.0)
+
+    # Idle utilization observed in heartbeat → detector stays TRAINING
+    # (observe during TRAINING does not transition; spec §7 contract).
+    hb = daemon.heartbeat()
+    assert hb.health == "training"
+    daemon.stop()
+
+
+def test_daemon_without_idle_detector_is_backwards_compatible():
+    """v0.0.3-shape callers (no idle_detector) get unchanged behavior."""
+    card = _card()
+    be = NullBackend(card=card)
+    daemon = ServeDaemon(backends=[be], probe=_probe())  # no idle_detector
+    daemon.start(wait_ready=True, ready_timeout=1.0)
+    hb = daemon.heartbeat()
+    assert hb.health == "healthy"
+    daemon.stop()
+
+
 def test_daemon_serves_multiple_backends_on_distinct_ports():
     """Multi-specialist coexistence (spec §3.3): GB10 with 128GB unified mem
     runs code AND math/general simultaneously, each on its own port.
