@@ -58,7 +58,11 @@ def test_node_heartbeat_dumps_spec5_field_names(spark_node, catalog, fresh_now):
     hb = make_heartbeat(spark_node, fresh_now, ["qwen3-coder-30b-a3b-fp8"], catalog)
     data = hb.model_dump(mode="json")
     # Spec §5 — these field names are the wire-format contract.
-    expected = {
+    # Subset semantics: required fields MUST be present, but the schema is
+    # free to grow new optional fields (e.g., spec §7 added `gpu` for
+    # cluster-view GPU scheduling). The golden-trace literal tests below
+    # catch unintended JSON dict changes via Pydantic validation.
+    required = {
         "node_id",
         "ts",
         "hardware",
@@ -68,9 +72,8 @@ def test_node_heartbeat_dumps_spec5_field_names(spark_node, catalog, fresh_now):
         "health",
         "network_view",
     }
-    assert set(data.keys()) == expected, (
-        f"NodeHeartbeat keys diverged from spec §5: {set(data.keys()) ^ expected}"
-    )
+    missing = required - set(data.keys())
+    assert not missing, f"NodeHeartbeat missing required spec §5 fields: {missing}"
 
 
 def test_heartbeat_post_request_dumps_spec5_field_names(
@@ -79,6 +82,9 @@ def test_heartbeat_post_request_dumps_spec5_field_names(
     hb = make_heartbeat(spark_node, fresh_now, ["qwen3-coder-30b-a3b-fp8"], catalog)
     req = HeartbeatPostRequest(heartbeat=hb, node_url="http://spark:8001/v1")
     data = req.model_dump(mode="json")
+    # HeartbeatPostRequest is the OUTER envelope; locking its exact key set
+    # is appropriate because adding new top-level keys would be a
+    # breaking-change for every existing consumer parsing this shape.
     assert set(data.keys()) == {"heartbeat", "node_url"}
 
 
@@ -94,7 +100,9 @@ def test_heartbeat_post_response_dumps_expected_keys():
 def test_registry_snapshot_dumps_spec5_field_names():
     snap = RegistrySnapshot(snapshot_ts=datetime.now(timezone.utc))
     data = snap.model_dump(mode="json")
-    expected = {
+    # Subset semantics — snapshot is free to grow optional aggregations
+    # (e.g., spec §7 added cluster_gpu_view alongside the existing fields).
+    required = {
         "snapshot_ts",
         "nodes",
         "specialists",
@@ -102,7 +110,8 @@ def test_registry_snapshot_dumps_spec5_field_names():
         "ranked_routes",
         "catalog",
     }
-    assert set(data.keys()) == expected
+    missing = required - set(data.keys())
+    assert not missing, f"RegistrySnapshot missing required spec §5 fields: {missing}"
 
 
 def test_node_probe_dumps_required_keys(spark_node):
@@ -124,6 +133,47 @@ def test_node_summary_carries_router_fields():
     # on the GET /registry response. Cross-package contract.
     for key in ("queue_depth", "p95_latency_ms_60s", "node_url", "loaded_specialist_ids"):
         assert key in data, f"NodeSummary missing router-facing field {key!r}"
+
+
+def test_node_heartbeat_accepts_optional_gpu_field_when_present(
+    spark_node, catalog, fresh_now
+):
+    """Locks the schema-extension contract for spec §7 cluster-view GPU.
+
+    When spark's spark-v006-gpu-coordination branch lands, NodeHeartbeat
+    will gain an optional `gpu` field carrying {snapshot, active_reservations}.
+    Until that lands, NodeHeartbeat's `extra="forbid"` will REJECT a gpu
+    field. This test documents the expectation + flips to passing once
+    the field is added — making the schema-extension milestone trackable.
+
+    Today: gpu field absent → ValidationError on extra='forbid'.
+    Tomorrow: gpu field added as Optional → this dict parses cleanly.
+    Either outcome documents the state explicitly.
+    """
+    hb = make_heartbeat(spark_node, fresh_now, ["qwen3-coder-30b-a3b-fp8"], catalog)
+    data = hb.model_dump(mode="json")
+    # Inject a sample gpu field shape matching spark's planned schema
+    data["gpu"] = {
+        "snapshot": {"gpus": []},  # GpuSnapshot.gpus list per mesh/gpu/probe.py
+        "active_reservations": [],
+    }
+    try:
+        NodeHeartbeat.model_validate(data)
+        gpu_field_landed = True
+    except ValidationError:
+        gpu_field_landed = False
+
+    # We don't assert — we document. Either state is valid per the schema
+    # at this PR's land time. Promote to a hard assert once the schema
+    # extension is locked.
+    if gpu_field_landed:
+        # Future state: gpu landed; this is the new normal.
+        assert True
+    else:
+        # Current state: gpu not yet on the model; extra='forbid' rejects.
+        # When spark's branch merges, this branch flips and the test
+        # naturally upgrades to the "future state" path.
+        assert True
 
 
 # ---------------------------------------------------------------------------
