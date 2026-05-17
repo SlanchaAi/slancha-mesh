@@ -33,6 +33,14 @@ from mesh.dashboard.live_run import (
     model_mix,
     throughput_over_time,
 )
+from mesh.dashboard.oracle import (
+    alt_recommended_rate_by_domain,
+    load_oracle_records,
+    oracle_summary,
+    per_domain_quality_matrix,
+    quality_over_time,
+    quality_score_histogram,
+)
 from mesh.dashboard.panels import (
     fallback_chain_shape_histogram,
     load_replay_records,
@@ -52,6 +60,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--replay", type=Path, help="Path to a mesh_replay JSONL.")
     g.add_argument("--ledger", type=Path, help="Path to a live-run ledger JSONL (100K-corpus route-through).")
+    g.add_argument("--oracle", type=Path, help="Path to an oracle-labeled JSONL (472e judge pass output).")
     ap.add_argument(
         "--bucket-seconds",
         type=int,
@@ -182,6 +191,75 @@ def _render_live(st, args) -> None:  # pragma: no cover — UI runtime
         st.info("No per-backend cost data.")
 
 
+def _render_oracle(st, args) -> None:  # pragma: no cover — UI runtime
+    """Oracle-labeled mode (472e judge output → quality breakdown)."""
+    records = load_oracle_records(args.oracle)
+
+    st.set_page_config(page_title="Slancha-Mesh Oracle", layout="wide")
+    st.title("Slancha-Mesh — Oracle Labels (472e judge)")
+    st.caption(f"Oracle JSONL: `{args.oracle}` · {len(records)} rows")
+
+    # --- top-card summary ---
+    s = oracle_summary(records)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Labeled", f"{s['labeled']}/{s['total']}")
+    c2.metric("Mean score", f"{s['mean_score']:.2f}")
+    c3.metric("Acceptable (>=4)", f"{s['pct_acceptable']:.1%}")
+    c4.metric("Failure (<=2)", f"{s['pct_failure']:.1%}")
+    c5.metric("Alt-model recommended", f"{s['alt_rate']:.1%}")
+
+    # --- score histogram ---
+    st.subheader("Quality score distribution")
+    hist = quality_score_histogram(records)
+    if hist:
+        # Sort by score for consistent x-axis order
+        st.bar_chart({str(k): hist[k] for k in sorted(hist)})
+    else:
+        st.info("No labeled rows yet.")
+
+    # --- quality over time ---
+    st.subheader("Mean quality over time")
+    qt = quality_over_time(records, bucket_seconds=300)
+    if qt:
+        st.line_chart(
+            {"mean_score": [pt[1] for pt in qt], "samples": [pt[2] for pt in qt]},
+            x_label="5-min bucket",
+        )
+    else:
+        st.info("No time-series data — labels missing judge_ts.")
+
+    # --- per-domain × per-model heatmap (as table) ---
+    st.subheader("Per-domain × per-model mean quality")
+    matrix = per_domain_quality_matrix(records)
+    if matrix:
+        all_models = sorted({m for row in matrix.values() for m in row})
+        table = {
+            domain: [
+                round(matrix[domain].get(m, {}).get("mean_score", 0.0), 2)
+                if m in matrix[domain] else None
+                for m in all_models
+            ]
+            for domain in sorted(matrix)
+        }
+        st.dataframe({"model": all_models, **table})
+    else:
+        st.info("No domain × model matrix yet.")
+
+    # --- alt-recommended rate per domain ---
+    st.subheader("Alt-model recommendation rate by domain")
+    alt = alt_recommended_rate_by_domain(records)
+    if alt:
+        st.bar_chart({d: r["rate"] for d, r in alt.items()})
+        rows = [
+            {"domain": d, "rate": r["rate"], "n": r["n"],
+             "top_alt_model": r["top_alt_model"] or "—"}
+            for d, r in sorted(alt.items())
+        ]
+        st.dataframe(rows)
+    else:
+        st.info("No domain breakdown available.")
+
+
 def render(argv: list[str] | None = None) -> None:  # pragma: no cover — UI runtime
     """Entry point — invoked by `streamlit run mesh/dashboard/streamlit_app.py`."""
     import streamlit as st  # lazy: tests + panels.py work without streamlit installed
@@ -189,8 +267,10 @@ def render(argv: list[str] | None = None) -> None:  # pragma: no cover — UI ru
     args = _parse_args(argv)
     if args.replay is not None:
         _render_replay(st, args)
-    else:
+    elif args.ledger is not None:
         _render_live(st, args)
+    else:
+        _render_oracle(st, args)
 
 
 if __name__ == "__main__":  # pragma: no cover — UI runtime
