@@ -1,6 +1,6 @@
-"""Streamlit renderer for mesh-replay + live-run dashboards.
+"""Streamlit renderer for mesh-replay + live-run + operator dashboards.
 
-Two modes:
+Four modes:
 
     # Replay-mode (mesh_replay JSONL, post-hoc analysis)
     streamlit run mesh/dashboard/streamlit_app.py -- --replay PATH/TO/replay.jsonl
@@ -8,11 +8,18 @@ Two modes:
     # Live-run mode (100K-corpus route-through ledger, near-real-time)
     streamlit run mesh/dashboard/streamlit_app.py -- --ledger PATH/TO/ledger.jsonl
 
+    # Oracle-label mode (post-judge quality analysis)
+    streamlit run mesh/dashboard/streamlit_app.py -- --oracle PATH/TO/oracle.jsonl
+
+    # Operator console (consolidated view over a dashboard/ directory containing
+    # stats.json + overrides.json + decisions.jsonl — what the pipeline emits live)
+    streamlit run mesh/dashboard/streamlit_app.py -- --operator slancha-test/dashboard/
+
 The wrapper is intentionally thin: it imports panel computers from
-`mesh.dashboard.panels` + `mesh.dashboard.live_run` (pure functions,
-testable without streamlit) and turns each return value into a streamlit
-widget. Add new panels by adding a pure function to the relevant module
-and a `render_*` call here.
+`mesh.dashboard.panels` + `mesh.dashboard.live_run` + `mesh.dashboard.oracle`
+(pure functions, testable without streamlit) and turns each return value into
+a streamlit widget. Add new panels by adding a pure function to the relevant
+module and a `render_*` call here.
 
 Mac doesn't have streamlit installed; this module imports it lazily so
 the rest of `mesh.dashboard` (panels + tests) keeps working without it.
@@ -61,6 +68,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument("--replay", type=Path, help="Path to a mesh_replay JSONL.")
     g.add_argument("--ledger", type=Path, help="Path to a live-run ledger JSONL (100K-corpus route-through).")
     g.add_argument("--oracle", type=Path, help="Path to an oracle-labeled JSONL (472e judge pass output).")
+    g.add_argument("--operator", type=Path, help="Path to dashboard/ dir with stats.json, overrides.json, decisions.jsonl (live operator console).")
+    ap.add_argument(
+        "--refresh-seconds",
+        type=int,
+        default=10,
+        help="Auto-refresh cadence for operator mode (default 10).",
+    )
     ap.add_argument(
         "--bucket-seconds",
         type=int,
@@ -260,6 +274,160 @@ def _render_oracle(st, args) -> None:  # pragma: no cover — UI runtime
         st.info("No domain breakdown available.")
 
 
+def _render_operator(st, args) -> None:  # pragma: no cover — UI runtime
+    """Operator console — consolidated view over a live dashboard/ directory.
+
+    Reads stats.json, overrides.json, decisions.jsonl from `args.operator`.
+    Tolerant of any missing — operator-side runs are messy. Refresh cadence
+    set by --refresh-seconds.
+    """
+    import json
+    import time
+    from datetime import datetime, timezone
+
+    dashboard_dir = args.operator
+    st.set_page_config(page_title="Slancha — Operator Console", layout="wide")
+
+    # Header
+    cols = st.columns([3, 1])
+    with cols[0]:
+        st.title("Slancha — Operator Console")
+        st.caption(f"Dashboard dir: `{dashboard_dir}` · refresh every {args.refresh_seconds}s")
+    with cols[1]:
+        st.markdown(f"#### {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        if st.button("↻ refresh"):
+            st.rerun()
+
+    def _safe_load_json(path):
+        try:
+            return json.loads((dashboard_dir / path).read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _safe_load_jsonl(path, tail=2000):
+        try:
+            lines = (dashboard_dir / path).read_text(encoding="utf-8").splitlines()
+            out = []
+            for ln in lines[-tail:]:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    out.append(json.loads(ln))
+                except json.JSONDecodeError:
+                    continue
+            return out
+        except Exception:
+            return []
+
+    stats = _safe_load_json("stats.json") or {}
+    overrides = _safe_load_json("overrides.json") or {}
+    decisions = _safe_load_jsonl("decisions.jsonl", tail=1000)
+
+    # ----- TOP STATUS BAR -----
+    st.subheader("System health")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    fg_rows = stats.get("floodgate", {}).get("rows", 0)
+    fg_total = stats.get("floodgate", {}).get("total", 100000)
+    c1.metric("Floodgate", f"{fg_rows:,} / {fg_total:,}",
+              f"{(100*fg_rows/max(fg_total,1)):.1f}%")
+    c2.metric("Oracle labels", f"{stats.get('oracle', {}).get('labels', 0):,}")
+    c3.metric("Override cells", f"{len(overrides.get('overrides', []))}")
+    c4.metric("From oracle rows", f"{overrides.get('from_oracle_rows', 0):,}")
+    proxy_healthy = stats.get("proxy", {}).get("healthy", False)
+    c5.metric("Proxy", "UP" if proxy_healthy else "DOWN",
+              delta=None,
+              delta_color="off" if proxy_healthy else "inverse")
+
+    # ----- THROUGHPUT + LATENCY -----
+    st.subheader("Routing throughput")
+    if decisions:
+        # Build (ts, latency_ms, decision) buckets per minute
+        from collections import Counter, defaultdict
+        per_minute = Counter()
+        latencies = []
+        decision_mix = Counter()
+        for d in decisions:
+            ts = d.get("ts")
+            try:
+                t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            bucket = t.replace(second=0, microsecond=0)
+            per_minute[bucket] += 1
+            lat = d.get("first_latency_ms")
+            if isinstance(lat, (int, float)) and lat > 0:
+                latencies.append(int(lat))
+            decision_mix[d.get("decision", "unknown")] += 1
+
+        tcol, lcol = st.columns(2)
+        with tcol:
+            st.caption("Requests / minute")
+            if per_minute:
+                sorted_buckets = sorted(per_minute.items())
+                st.line_chart({"req/min": [n for _, n in sorted_buckets]})
+            else:
+                st.info("No timestamps in decisions log yet.")
+        with lcol:
+            st.caption("Latency percentiles (last 1000 requests)")
+            if latencies:
+                latencies.sort()
+                def _pct(p):
+                    i = min(len(latencies) - 1, int(len(latencies) * p))
+                    return latencies[i]
+                lc1, lc2, lc3 = st.columns(3)
+                lc1.metric("p50", f"{_pct(0.5)} ms")
+                lc2.metric("p95", f"{_pct(0.95)} ms")
+                lc3.metric("p99", f"{_pct(0.99)} ms")
+            else:
+                st.info("No latency data yet.")
+        st.caption("Decision mix")
+        st.bar_chart({k: v for k, v in decision_mix.items()})
+    else:
+        st.info("No decisions log yet — recirc proxy may not be running.")
+
+    # ----- OVERRIDE TABLE -----
+    st.subheader("Override table — what the loop has learned")
+    override_rows = overrides.get("overrides", [])
+    if override_rows:
+        flat = []
+        for o in override_rows:
+            match = o.get("match", {})
+            flat.append({
+                "domain":         match.get("domain", "?"),
+                "difficulty":     match.get("difficulty", "?"),
+                "language":       match.get("language", "?"),
+                "preferred":      o.get("preferred_model", "?"),
+                "support":        o.get("support", 0),
+                "mean_score":     o.get("mean_score", 0),
+                "n_alternatives": len(o.get("alternatives", [])),
+            })
+        # Sort by impact = support × mean_score
+        flat.sort(key=lambda r: -(r["support"] * r["mean_score"]))
+        st.dataframe(flat, use_container_width=True)
+        st.caption(
+            f"{len(flat)} cells · {overrides.get('from_oracle_rows', 0):,} oracle "
+            f"rows · min support = {overrides.get('min_support', 'n/a')}"
+        )
+    else:
+        st.info("No overrides yet — aggregator needs more oracle data.")
+
+    # ----- RECENT DECISIONS (tail) -----
+    with st.expander(f"Recent decisions (last {min(50, len(decisions))})"):
+        st.dataframe(decisions[-50:][::-1], use_container_width=True)
+
+    # ----- RAW STATS (debug) -----
+    with st.expander("Raw stats.json"):
+        st.json(stats)
+    with st.expander("Raw overrides.json (truncated)"):
+        st.json({**overrides, "overrides": overrides.get("overrides", [])[:5]})
+
+    # ----- AUTO-REFRESH -----
+    if args.refresh_seconds > 0:
+        time.sleep(args.refresh_seconds)
+        st.rerun()
+
+
 def render(argv: list[str] | None = None) -> None:  # pragma: no cover — UI runtime
     """Entry point — invoked by `streamlit run mesh/dashboard/streamlit_app.py`."""
     import streamlit as st  # lazy: tests + panels.py work without streamlit installed
@@ -269,8 +437,10 @@ def render(argv: list[str] | None = None) -> None:  # pragma: no cover — UI ru
         _render_replay(st, args)
     elif args.ledger is not None:
         _render_live(st, args)
-    else:
+    elif args.oracle is not None:
         _render_oracle(st, args)
+    else:
+        _render_operator(st, args)
 
 
 if __name__ == "__main__":  # pragma: no cover — UI runtime
