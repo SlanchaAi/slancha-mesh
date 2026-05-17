@@ -1,14 +1,22 @@
 # Slancha Pipeline Diagram — Design Spec
 
-**Status:** draft v0 — locked enough for spark to code v0 HTML against. Living doc; expect edits.
-**Audience:** spark (HTML/SVG author), mac (visual reviewer), operator (consumer).
-**Reference:** Go Pro Plumbing "Recirculating Hot Water System Diagram". Plumbing-clean two-tone, big labeled boxes, supply/return semantic, legend bottom.
+**Status:** v1 — recirculating-loop semantic. Living doc.
+**Authoring:** mac (spec + iteration), spark (initial v0 sketch handed off in slancha-test).
+**Audience:** operator, Stripe partner-pitch live screen, future-us after compaction.
+**Reference:** Go Pro Plumbing "Recirculating Hot Water System Diagram" + TensorZero observability/retrain loop semantic. The diagram is **the recirculating pump itself** — prompt enters, response/labels accumulate, FT retrains, weights swap back into the proxy, loop closes.
 
 ## 1 — What this diagram is for
 
-One-page, glanceable answer to: **"What does Slancha actually do to a prompt?"** — for an operator (engineering-literate, not in our heads), a partner (Stripe-style pitch viewer), or future-us catching up after a context compact.
+One-page, glanceable answer to: **"What does Slancha actually do, and how does it self-improve?"** — for the Stripe partner-pitch (live screen during meeting), an operator catching up, or future-us after a context compact.
 
-Not a docs-quality architecture diagram. Not a Mermaid flowchart. Not a metrics dashboard. The dashboard pages (`mesh/dashboard/`) already do metrics. This is the **flow** view, and it should pulse with live activity when wired.
+Not a docs-quality architecture diagram. Not a Mermaid flowchart. Not a metrics dashboard — `mesh/dashboard/` already does metrics. This is the **closed-loop flow** view, pulsing with live activity, with visible "redeploy events" when classifier weights swap.
+
+The diagram must communicate **two simultaneous loops** in one frame:
+
+- **FAST loop (classifier):** minutes-scale. ORACLE → mmbert-head FT → atomic-swap weights into PROXY. Demo headliner — partner sees classifier accuracy climb live.
+- **SLOW loop (generator):** hours-scale. CAPTURE → QLoRA on (prompt, response, judge_score) triples → adapter deploy to mesh vllm. Background telemetry.
+
+Operator/pitch viewer should grok both at-a-glance.
 
 ## 2 — Component map
 
@@ -24,7 +32,9 @@ The diagram's spine. Each row = one component. Spark codes one SVG node per row.
 | `models_cloud` | **Cloud OSS** — OpenRouter fan-out | rounded rect | right side of proxy, below local | Llama-3.1, Mixtral, Qwen, DeepSeek (cost-bounded fallback) | Glow when fallback fires |
 | `capture` | **Capture** — ledger.jsonl | rounded rect | bottom-center | Persists `{prompt, signals, route, response, tokens, latency, cost}` per row | File-size badge (live tail of byte count) |
 | `oracle` | **Oracle Judge** — Qwen3-Coder-30B-A3B-FP8 on spark-472e | rounded rect | bottom-right | Reads capture, scores 1-5, flags better-model | Pulse rate = current judgments/min |
-| `ft` | **Fine-tune** — peft + accelerate | rounded rect, dashed border | far-right | Future: classifier FT first, generator QLoRA next | Dashed/idle until job kicks; solid + glow when training |
+| `ft_fast` | **Classifier FT** — mmbert-head retrain (live) | rounded rect | far-right, upper | FAST loop. Streams oracle labels, retrains heads continuously, emits new weights | Glow continuously during training; spike + label "REDEPLOY" on weight emit |
+| `ft_slow` | **Generator FT** — QLoRA (batch) | rounded rect, dashed border | far-right, lower | SLOW loop. Batches (prompt, response, judge_score) triples, runs QLoRA on accumulated data | Dashed/idle between batches; solid + glow when training; rare REDEPLOY spike |
+| `registry` | **Model Registry** — atomic-swap weights | small rect, between FT and proxy | Hot-swap target. Receives new weights from either FT loop, signals proxy to reload | Throbbing pulse on each REDEPLOY event |
 
 Optional secondary nodes (omit in v0 if cluttered):
 
@@ -57,26 +67,45 @@ Route:
 
 Capture is the convergence point; both model groups merge into it.
 
-### Control (slate — config / FT trigger / monitoring; not load-bearing semantic)
+### Recirculation (violet — the pump — load-bearing semantic, this is the headline)
+
+Color: `#a855f7` (purple-500). Width: `2.5px`. Style: solid. Animation: dashed-array scrolling `3s linear infinite` (slightly slower than supply/return so it reads as a different phenomenon).
+
+Route (the pump that closes the loop):
+```
+oracle  → ft_fast  → registry → proxy   (FAST loop — classifier weights)
+capture → ft_slow  → registry → proxy   (SLOW loop — generator weights, dashed-style line for in-batch state)
+```
+
+**REDEPLOY events** — when `registry → proxy` fires (atomic weight swap), the registry node *throbs* (scale pulse 1.0 → 1.08 → 1.0 over 0.6s, ease-in-out) AND a brighter violet pulse propagates along the `registry → proxy` segment. Visible label "REDEPLOY" appears for 1.5s. This is the demo headline.
+
+Two-loop visual distinction:
+- **FAST loop:** solid violet, 3s dash period, REDEPLOY label `↻ classifier v{N+1}` (frequent — every few minutes during demo)
+- **SLOW loop:** dashed violet `8 6`, 6s dash period, REDEPLOY label `↻ generator v{N+1}` (rare — once per hour-ish)
+
+### Control (slate — config / monitoring only; not load-bearing semantic)
 
 Color: `#64748b` (slate-500). Width: `1.5px`. Style: dashed `4 4`. No animation.
 
 Route:
 ```
-oracle ⇢ ft     (oracle output feeds FT dataset)
 capture ⇢ dashboard  (if dashboard node present)
-classifier ⇢ ft (mmbert FT loops back through here)
 ```
+
+(Note: the FT-feedback edges are NOT control — they're recirculation, the whole point of the loop. Use violet.)
 
 ## 4 — Color palette (locked)
 
 | Token | Hex | Use |
 |-------|-----|-----|
-| `--supply` | `#f97316` | warm supply lines, hot/active glow |
-| `--return` | `#06b6d4` | cool return lines, response/data-going-back |
-| `--control` | `#64748b` | dashed control/monitoring links |
-| `--idle` | `#94a3b8` | components not active in current state (e.g., FT before kickoff) |
+| `--supply` | `#f97316` | warm supply lines, prompt-forward path |
+| `--return` | `#06b6d4` | cool return lines, response-back path |
+| `--recirculate` | `#a855f7` | the pump — FT → registry → proxy weight-swap channel (headline) |
+| `--redeploy-glow` | `#d8b4fe` | brighter violet for REDEPLOY event pulse |
+| `--control` | `#64748b` | dashed control/monitoring links (non-load-bearing) |
+| `--idle` | `#94a3b8` | components not active in current state |
 | `--error` | `#ef4444` | error pulse, probe-block, oracle-failure flag |
+| `--success` | `#22c55e` | "labels accumulating" / "loop closing successfully" |
 | `--bg` | `#0f172a` | dark page background (slate-900) |
 | `--bg-card` | `#1e293b` | component box fill (slate-800) |
 | `--text` | `#f8fafc` | primary text (slate-50) |
@@ -107,11 +136,15 @@ All driven by CSS, no JS for v0. Honor `prefers-reduced-motion`.
 
 | Animation | Selector | Definition | When live |
 |-----------|----------|------------|-----------|
-| Supply flow | `.flow-supply` | `stroke-dasharray: 8 6; stroke-dashoffset` animates from 14 → 0 over 2s linear infinite | Always (or rate ∝ live req/s) |
+| Supply flow | `.flow-supply` | `stroke-dasharray: 8 6; stroke-dashoffset` animates 14 → 0 over 2s linear infinite | Always (or rate ∝ live req/s) |
 | Return flow | `.flow-return` | mirror of supply, reversed direction | Always |
+| Recirculate (FAST) | `.flow-recirc-fast` | `stroke-dasharray: 8 6; stroke-dashoffset` animates 14 → 0 over 3s linear infinite | Always when classifier FT running |
+| Recirculate (SLOW) | `.flow-recirc-slow` | `stroke-dasharray: 12 8` (longer dashes); animates over 6s linear infinite | Always when generator FT running; idle-styled between batches |
 | Pulse glow | `.pulse-active` | `box-shadow` pulses between component color and white over 1.2s ease-in-out infinite | Component currently processing |
+| REDEPLOY event | `.redeploy-throb` | `transform: scale(1) → scale(1.08) → scale(1)` over 0.6s ease-in-out; concurrent `--redeploy-glow` halo over 1.5s. Label `REDEPLOY ↻ classifier v{N+1}` (or generator) fades in/out alongside. | Triggered on weight-swap event. Demo headline. |
+| Loop-closed flash | `.loop-closed` | green `--success` ring around the entire diagram for 0.3s | When a full FAST loop completes (oracle label → FT → redeploy → routing improvement detected) — rare, ceremonial |
 | Error flash | `.pulse-error` | `box-shadow` flashes `--error` over 0.5s, 3 times | On error event |
-| Idle | `.idle` | filter: grayscale(0.6) opacity(0.6) | Component not yet active (FT pre-kickoff) |
+| Idle | `.idle` | filter: grayscale(0.6) opacity(0.6) | Component not yet active |
 
 `prefers-reduced-motion: reduce` → strip all dash animations, set components to static glow corresponding to current state, no pulse. Color still indicates state.
 
@@ -155,47 +188,72 @@ A single row at the bottom, 32px tall, with:
 
 1. Orange line + label `Prompt forward (supply)`
 2. Cyan line + label `Response back (return)`
-3. Dashed slate line + label `Control / monitoring`
-4. Red filled circle + label `Error / block`
-5. Grey/desaturated box + label `Idle component`
-6. White-on-orange chip showing example `847/min` + label `Live throughput`
+3. **Violet solid line + label `↻ Classifier retrain (FAST loop)`**
+4. **Violet dashed line + label `↻ Generator retrain (SLOW loop)`**
+5. Dashed slate line + label `Control / monitoring`
+6. Red filled circle + label `Error / block`
+7. Green ring + label `Loop closed (full cycle)`
+8. Grey/desaturated box + label `Idle component`
+9. White-on-orange chip showing example `847/min` + label `Live throughput`
 
-## 10 — Layout (rough sketch — spark may iterate)
+The two violet entries are the headline — make them visually prominent in the legend so a pitch viewer reads "this thing self-improves" without us saying it.
+
+## 10 — Layout (the pump — recirculating closed loop)
+
+Topology priority: the closed-loop must be visually obvious. The supply path goes left-to-right across the top; the return path comes back right-to-left in the middle; the recirculation (FT → registry → proxy) loops UP from the bottom-right back to the proxy at the top, forming a clear "pump" silhouette.
 
 ```
-+------------------------------------------------------------------------+
-|  [Corpus]──supply──>[Classifier]──supply──>[Probe]──supply──>[Proxy]   |
-|     100K v3.1          mmbert-6h             gate            :8766     |
-|                                                                  ╲     |
-|                                                                   ╲    |
-|                                                              [Local Models]
-|                                                              codestral │ phi4
-|                                                              gemma2    │ qwen3:8
-|                                                                        │ qwen3:4
-|                                                                  ╲     |
-|                                                              [Cloud OSS]
-|                                                                        │
-|              <──return──[Capture]<──return──── merged from both
-|                  ledger.jsonl
-|                       │                                                │
-|                  control                                          control
-|                       v                                                v
-|                  [Dashboard]                                       [Oracle]
-|                  streamlit                                          Qwen3-30B
-|                                                                    on 472e
-|                                                                       │
-|                                                                  control
-|                                                                       v
-|                                                                    [FT]
-|                                                                    peft+accelerate
-|                                                                    (idle)
-|                                                                        |
-| ─────────────────────────────────────────────────────────────────────  |
-| LEGEND: ─── supply | ─── return | ┄┄┄ control | ● error | dim idle      |
-+------------------------------------------------------------------------+
+       SUPPLY (warm) ────────────────────────────────────────>
+       ┌─────────┐   ┌──────────┐   ┌─────┐   ┌─────────┐
+       │ Corpus  │──>│Classifier│──>│Probe│──>│ Proxy   │─┐
+       │ 100K    │   │ mmbert-6h│   │     │   │ :8766   │ │
+       └─────────┘   └──────────┘   └─────┘   └─────────┘ │
+                          ^                              v
+                          │                       ┌──────────────┐
+                          │                       │ Local Models │
+                          │                       │ 5× ollama    │─┐
+                       (recirc                    └──────────────┘ │
+                        target)                   ┌──────────────┐ │
+                          │                       │ Cloud OSS    │─┤
+                          │                       └──────────────┘ │
+                          │                                        v
+                          │                              <───── RETURN (cool) ──
+                          │                         ┌─────────┐
+                          │                         │ Capture │
+                          │                         │ ledger  │
+                          │                         └─────────┘
+                          │                              │  │
+                          │                       ──────-┘  └─────
+                          │                       v                v
+                          │                  ┌────────┐       ┌────────┐
+                          │     RECIRC FAST  │ Oracle │       │ ft_slow│
+                          │     (violet)     │ Judge  │       │ QLoRA  │
+                          │                  │ 472e   │       │ (batch)│
+                          │                  └────────┘       └────────┘
+                          │                       │                │
+                          │                       v                │
+                          │                  ┌────────┐            │
+                          │                  │ft_fast │            │
+                          │                  │mmbert  │            │
+                          │                  │(live)  │            │
+                          │                  └────────┘            │
+                          │                       │                │
+                          │     RECIRC SLOW       │                │
+                          │     (dashed violet)   v                v
+                          │                  ┌─────────────────────┐
+                          │                  │  Model Registry     │
+                          │                  │  (atomic swap)      │
+                          │                  └─────────────────────┘
+                          └─────── RECIRC (THE PUMP) ────┘
+                                      ↻ REDEPLOY
+| ───────────────────────────────────────────────────────────────────  |
+| LEGEND: ─── supply | ─── return | ━━ recirc-fast | ┅┅ recirc-slow |
+|         ┄┄ control | ● error | ○ loop-closed | dim idle              |
 ```
 
-(That ASCII is approximate. Spark's SVG will be cleaner; this is just to anchor positions.)
+The loop closure (recirc → registry → proxy) is the headline. At the apex of the recirc curve, place the `REDEPLOY ↻` event label.
+
+(ASCII is approximate. Spark's v0 SVG/HTML is the real reference; mac iterates from there.)
 
 ## 11 — Accessibility checklist
 
@@ -206,7 +264,17 @@ A single row at the bottom, 32px tall, with:
 - `prefers-reduced-motion` honored (per §7).
 - Don't rely on color alone — pair supply/return colors with arrow direction + line position (warm above, cool below where layout allows).
 
-## 12 — Out of scope for v0
+## 12 — Stripe partner-pitch live-screen mode
+
+This diagram doubles as the live screen during the Stripe pitch. Implications:
+
+- **Default to dark mode.** Looks better on projector + matches conference room lighting.
+- **REDEPLOY events should be visible from the back of a meeting room.** Glow halo, scale throb, label fade-in — all generous, not subtle.
+- **Resilient to no-data:** if spark's stats poller (`scripts/pipeline_stats.py`) is down, default to a *demo loop* — staged synthetic stats playing on a 30s cycle so the diagram never "freezes" on stage. Toggle via `?demo=1` URL param.
+- **Loud "↻" symbol** somewhere in the title/header — communicates "this thing recirculates" without needing a caption.
+- **Numbers should ground the abstraction:** show actual req/s, label count, model-mix histogram. Pitch viewer believes a thing is real when there are real numbers attached.
+
+## 13 — Out of scope for v0
 
 - Interactive drilldown (click a model → see model card). Future v2.
 - Cost overlay (per-component cost burndown). Future once meter shim flows real Stripe events.
@@ -214,17 +282,21 @@ A single row at the bottom, 32px tall, with:
 - 3D / isometric variations. Plumbing-clean = 2D.
 - Audio cues. Hard no.
 
-## 13 — Mac review checkpoints
+## 14 — Mac iteration checkpoints
 
-When spark posts v0 HTML to `slancha-test/dashboard/pipeline.html`:
+Spark hands off v0 sketch at `slancha-test/dashboard/pipeline.html`. Mac takes over. On each iteration commit, verify against:
 
-1. Component count matches §2 (9 primary nodes; optional `meter`/`dashboard` if included).
-2. Two-tone palette matches §4 hex codes.
-3. Supply/return animation direction correct (warm = forward, cool = backward).
-4. Legend present at bottom (§9).
-5. Reduced-motion fallback present.
-6. No layout overlap at 1280×720 viewport (laptop-default).
+1. Component count matches §2 (primary nodes including `ft_fast`, `ft_slow`, `registry`).
+2. **Recirculating-loop topology is visually obvious** — eye traces the pump path naturally.
+3. Three-channel palette (supply / return / recirculate) matches §4 hex codes.
+4. **REDEPLOY event animation is generous** (back-of-room visibility — §12).
+5. Two-loop distinction is readable (FAST = solid violet, SLOW = dashed violet).
+6. Live data shape matches §8 (consumes `dashboard/stats.json` written by spark's `scripts/pipeline_stats.py`).
+7. `?demo=1` mode for stage-resilient pitch playback.
+8. Legend present at bottom (§9), violet entries prominent.
+9. Reduced-motion fallback (§7).
+10. No layout overlap at 1280×720 viewport.
 
-Mac flags via wire `visual delta: ...` lines for each gap. Quick-iteration.
+Mac commits iterations to `slancha-test/dashboard/pipeline.html`. Spec stays in slancha-mesh; cross-repo OK since spec is reference, HTML is artifact.
 
-— spec by mac (claude-opus-4-7), 2026-05-17, slancha-mesh main
+— spec by mac (claude-opus-4-7), 2026-05-17. v1 = recirculating-loop semantic (operator clarification + TensorZero framing).
