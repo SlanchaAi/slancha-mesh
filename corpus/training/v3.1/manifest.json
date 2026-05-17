@@ -2,7 +2,7 @@
   "version": "3.1",
   "seed": 12648430,
   "total_target": 100000,
-  "total": 98385,
+  "total": 100000,
   "target_distribution_pct": {
     "code": 0.275,
     "general": 0.225,
@@ -15,24 +15,24 @@
   "achieved_distribution": {
     "code": 27500,
     "general": 22500,
-    "reasoning": 13385,
+    "reasoning": 15000,
     "math": 10000,
     "multilingual": 10000,
     "creative": 10000,
     "tool-use": 5000
   },
   "achieved_distribution_pct": {
-    "code": 0.2795,
-    "general": 0.2287,
-    "reasoning": 0.136,
-    "math": 0.1016,
-    "multilingual": 0.1016,
-    "creative": 0.1016,
-    "tool-use": 0.0508
+    "code": 0.275,
+    "general": 0.225,
+    "reasoning": 0.15,
+    "math": 0.1,
+    "multilingual": 0.1,
+    "creative": 0.1,
+    "tool-use": 0.05
   },
   "classifier_provenance": {
     "heuristic-v3": 34626,
-    "heuristic-v3+source-domain": 63759
+    "heuristic-v3+source-domain": 65374
   },
   "undercount_per_domain": {
     "code": 23319,
@@ -44,7 +44,7 @@
   },
   "supplementation_log": {
     "code": "supplemented 23319/23319 via [humaneval=164, codesearchnet=23155]",
-    "reasoning": "PARTIAL: 12032/13647 via [mmlu-pro=12032] (short 1615)",
+    "reasoning": "supplemented 13647/13647 via [mmlu-pro=12032, arc-challenge=1119, openbookqa=496]",
     "math": "supplemented 6981/6981 via [mmlu-pro-math=6981]",
     "multilingual": "supplemented 6427/6427 via [aya-nonen=6427]",
     "creative": "supplemented 10000/10000 via [dolly-creative=6217, no-robots=3783]",
@@ -52,8 +52,8 @@
   },
   "v3_source_sha256": "146f3a6336105a6b03808a9237b6d4502f016a31be67b045235a6147ef0f09a7",
   "classified_source_sha256": null,
-  "output_sha256": "9aca615a8c12b45ebd01ba64804c7655ff3f064207a655c879d4eab6a6d8eb74",
+  "output_sha256": "65621525de3847eb31a79558c5bdb78c17a5e34ca92052d08ef229990cc690e0",
   "output_path": "corpus/training/v3.1/prompts.jsonl",
-  "elapsed_s": 32.7,
-  "built_at": "2026-05-17T01:00:46Z"
+  "elapsed_s": 40.63,
+  "built_at": "2026-05-17T01:16:46Z"
 }
