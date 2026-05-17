@@ -1,0 +1,61 @@
+{
+  "version": 3,
+  "seed": 12648430,
+  "per_source_quota": 33334,
+  "requested_per_source_quota": 25000,
+  "target_total": 100000,
+  "skipped_sources": [
+    {
+      "name": "lmsys",
+      "reason": "lmsys/lmsys-chat-1m is gated; set HF_TOKEN + accept the dataset on huggingface.co/datasets/lmsys/lmsys-chat-1m to enable."
+    }
+  ],
+  "total": 100002,
+  "per_source_counts": {
+    "wildchat": 33334,
+    "openorca": 33334,
+    "ultrachat": 33334
+  },
+  "per_domain_counts": {
+    "general": 87876,
+    "code": 4181,
+    "math": 3019,
+    "multilingual": 3573,
+    "reasoning": 1353
+  },
+  "per_language_counts": {
+    "en": 93787,
+    "other": 6215
+  },
+  "per_difficulty_counts": {
+    "easy": 41890,
+    "hard": 30862,
+    "medium": 27250
+  },
+  "sources": [
+    {
+      "name": "wildchat",
+      "hf_id": "allenai/WildChat-1M",
+      "split": "train"
+    },
+    {
+      "name": "lmsys",
+      "hf_id": "lmsys/lmsys-chat-1m",
+      "split": "train"
+    },
+    {
+      "name": "openorca",
+      "hf_id": "Open-Orca/OpenOrca",
+      "split": "train"
+    },
+    {
+      "name": "ultrachat",
+      "hf_id": "HuggingFaceH4/ultrachat_200k",
+      "split": "train_sft"
+    }
+  ],
+  "output_sha256": "0964af4126e71ea7cbbae054af8b3131e38f7ca66b739e49342969478c228ecc",
+  "output_path": "corpus/training/v3/prompts.jsonl",
+  "elapsed_s": 88.33,
+  "built_at": "2026-05-17T00:45:16Z"
+}
