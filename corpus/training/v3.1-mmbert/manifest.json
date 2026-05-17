@@ -52,8 +52,10 @@
   },
   "v3_source_sha256": "146f3a6336105a6b03808a9237b6d4502f016a31be67b045235a6147ef0f09a7",
   "classified_source_sha256": "3a529841bac95713633b65a3926173563d3f8fb3c79ef3d754598b20078d4d02",
-  "output_sha256": "5718ba3ccc32d63bc8bacc66dd4fb39c767b3d6b29d5540c6fd83bd60bb5fb90",
+  "output_sha256": "4fa345d0bb48e5ee675984fa47e8a0a0e84ecd8809bd08e40636119c7acde628",
   "output_path": "corpus/training/v3.1-mmbert/prompts.jsonl",
   "elapsed_s": 39.13,
-  "built_at": "2026-05-17T02:10:25Z"
+  "built_at": "2026-05-17T02:10:25Z",
+  "sha_corrected_note": "Corrected post-publication: prior value was the stream-hash of json.dumps() output WITHOUT trailing newlines, which doesn't match the file on disk. This sha now matches `shasum -a 256`.",
+  "output_sha256_old_buggy": "5718ba3ccc32d63bc8bacc66dd4fb39c767b3d6b29d5540c6fd83bd60bb5fb90"
 }

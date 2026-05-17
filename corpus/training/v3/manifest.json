@@ -54,8 +54,10 @@
       "split": "train_sft"
     }
   ],
-  "output_sha256": "0964af4126e71ea7cbbae054af8b3131e38f7ca66b739e49342969478c228ecc",
+  "output_sha256": "146f3a6336105a6b03808a9237b6d4502f016a31be67b045235a6147ef0f09a7",
   "output_path": "corpus/training/v3/prompts.jsonl",
   "elapsed_s": 88.33,
-  "built_at": "2026-05-17T00:45:16Z"
+  "built_at": "2026-05-17T00:45:16Z",
+  "sha_corrected_note": "Corrected post-publication: prior value was the stream-hash of json.dumps() output WITHOUT trailing newlines, which doesn't match the file on disk. This sha now matches `shasum -a 256`.",
+  "output_sha256_old_buggy": "0964af4126e71ea7cbbae054af8b3131e38f7ca66b739e49342969478c228ecc"
 }

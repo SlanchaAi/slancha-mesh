@@ -711,12 +711,15 @@ def build_v3_1(
 
     # 5. Write output + manifest
     print(f"[v3.1] writing {len(final_records)} rows to {output_path} ...", file=sys.stderr)
-    h = hashlib.sha256()
     with output_path.open("w", encoding="utf-8") as fout:
         for rec in final_records:
             line = json.dumps(rec, ensure_ascii=False)
             fout.write(line + "\n")
-            h.update(line.encode("utf-8"))
+    # Hash POST-WRITE so manifest sha matches `shasum -a 256` on disk.
+    h = hashlib.sha256()
+    with output_path.open("rb") as fread:
+        for chunk in iter(lambda: fread.read(1 << 16), b""):
+            h.update(chunk)
 
     achieved: dict[str, int] = defaultdict(int)
     for r in final_records:

@@ -351,7 +351,6 @@ def build_corpus(
     per_language_counts: dict[str, int] = {}
     per_difficulty_counts: dict[str, int] = {}
     total = 0
-    h = hashlib.sha256()
 
     with output_path.open("w", encoding="utf-8") as fout:
         for src in accessible:
@@ -375,7 +374,6 @@ def build_corpus(
                 }
                 line = json.dumps(row, ensure_ascii=False)
                 fout.write(line + "\n")
-                h.update(line.encode("utf-8"))
                 count += 1
                 total += 1
                 per_domain_counts[sig["domain"]] = (
@@ -403,6 +401,12 @@ def build_corpus(
             )
 
     elapsed = time.time() - started
+    # Hash the file POST-WRITE so the manifest sha matches what `shasum -a 256`
+    # reports on disk (the stream-hash approach used to skip trailing newlines).
+    h = hashlib.sha256()
+    with output_path.open("rb") as fread:
+        for chunk in iter(lambda: fread.read(1 << 16), b""):
+            h.update(chunk)
     manifest = {
         "version": 3,
         "seed": seed,
