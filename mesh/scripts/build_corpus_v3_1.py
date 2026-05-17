@@ -269,6 +269,37 @@ def _dolly_creative_extract(rec: dict) -> str | None:
     return instr[:1500] if instr else None
 
 
+def _arc_extract(rec: dict) -> str | None:
+    q = (rec.get("question") or "").strip()
+    return q[:1500] if q else None
+
+
+def _openbookqa_extract(rec: dict) -> str | None:
+    """OpenBookQA — the question_stem is the prompt."""
+    q = (rec.get("question_stem") or "").strip()
+    if not q and "question" in rec:
+        # Some dump variants wrap as {question: {stem: ...}}
+        inner = rec.get("question")
+        if isinstance(inner, dict):
+            q = (inner.get("stem") or "").strip()
+        elif isinstance(inner, str):
+            q = inner.strip()
+    return q[:1500] if q else None
+
+
+def _boolq_extract(rec: dict) -> str | None:
+    q = (rec.get("question") or "").strip()
+    passage = (rec.get("passage") or "").strip()
+    if not q:
+        return None
+    # Combine question + supporting passage for richer reasoning prompt
+    if passage:
+        text = f"{q}\n\nContext: {passage}"
+    else:
+        text = q
+    return text[:1500]
+
+
 def _aya_non_english_extract(rec: dict) -> str | None:
     """CohereForAI/aya_dataset — accept only rows where the prompt is in a
     non-English language (language_code != 'eng' / 'en'). Multilingual
@@ -316,6 +347,30 @@ SUPPLEMENTAL_SOURCES: dict[str, list[SupplementalSource]] = {
             config=None,
             split="test",
             extract=_mmlupro_extract,
+            expected_domain="reasoning",
+        ),
+        SupplementalSource(
+            name="arc-challenge",
+            hf_id="allenai/ai2_arc",
+            config="ARC-Challenge",
+            split="train",
+            extract=_arc_extract,
+            expected_domain="reasoning",
+        ),
+        SupplementalSource(
+            name="openbookqa",
+            hf_id="allenai/openbookqa",
+            config="main",
+            split="train",
+            extract=_openbookqa_extract,
+            expected_domain="reasoning",
+        ),
+        SupplementalSource(
+            name="boolq",
+            hf_id="google/boolq",
+            config=None,
+            split="train",
+            extract=_boolq_extract,
             expected_domain="reasoning",
         ),
     ],
