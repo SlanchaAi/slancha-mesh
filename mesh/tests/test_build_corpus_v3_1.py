@@ -84,21 +84,36 @@ def test_load_classified_skips_rows_missing_id_or_signals(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_merge_overlays_signals_and_tags_mmbert():
+def test_merge_translates_mmbert_signals():
+    """mmbert academic-taxonomy signals (with domain_confidence) get
+    translated to the routing taxonomy. computer science → code."""
     v3 = [
         {"prompt_id": "a", "signals": {"domain": "general", "language": "en"}},
         {"prompt_id": "b", "signals": {"domain": "general"}},
     ]
-    cls = {"a": {"domain": "code", "language": "de"}}
+    cls = {"a": {"domain": "computer science", "domain_confidence": 0.95,
+                 "language": "en", "difficulty": "medium"}}
     merged, n_overlaid = merge_with_classified(v3, cls)
     assert n_overlaid == 1
-    # a got overlaid → code + de + mmbert provenance
+    # a got mmbert overlay → translated domain "code" + translated provenance
     assert merged[0]["signals"]["domain"] == "code"
-    assert merged[0]["signals"]["language"] == "de"
-    assert merged[0]["signals"]["classifier"] == "mmbert-6h"
+    assert merged[0]["signals"]["classifier"] == "mmbert-6h-translated"
+    # Original mmbert academic-domain preserved for posterity
+    assert merged[0]["signals"]["mmbert_domain"] == "computer science"
     # b keeps heuristic + heuristic-v3 tag
     assert merged[1]["signals"]["domain"] == "general"
     assert merged[1]["signals"]["classifier"] == "heuristic-v3"
+
+
+def test_merge_translates_non_english_to_multilingual():
+    """mmbert.language != 'en' overrides domain to multilingual."""
+    v3 = [{"prompt_id": "a", "signals": {"domain": "general"}}]
+    cls = {"a": {"domain": "history", "domain_confidence": 0.8,
+                 "language": "de", "language_confidence": 0.9}}
+    merged, _ = merge_with_classified(v3, cls)
+    assert merged[0]["signals"]["domain"] == "multilingual"
+    # mmbert provenance survives
+    assert merged[0]["signals"]["mmbert_language"] == "de"
 
 
 def test_merge_preserves_non_signal_fields():
