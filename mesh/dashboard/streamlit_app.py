@@ -32,6 +32,12 @@ import argparse
 import sys
 from pathlib import Path
 
+from mesh.dashboard.cost import (
+    MODEL_PRICING,
+    compute_actual_cost,
+    cost_summary,
+    estimated_field_explanation,
+)
 from mesh.dashboard.live_run import (
     cost_and_latency_summary,
     error_rate_over_time,
@@ -385,6 +391,38 @@ def _render_operator(st, args) -> None:  # pragma: no cover — UI runtime
         st.bar_chart({k: v for k, v in decision_mix.items()})
     else:
         st.info("No decisions log yet — recirc proxy may not be running.")
+
+    # ----- COUNTERFACTUAL COST (the Stripe pitch number) -----
+    if decisions:
+        cs = cost_summary(decisions)
+        st.subheader("Counterfactual savings — vs always-Claude")
+        if cs.estimated:
+            st.caption(f"⚠ {estimated_field_explanation()}")
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        cc1.metric("Slancha actual",      f"${cs.actual_usd:.4f}")
+        cc2.metric("If all-Claude Sonnet", f"${cs.counterfactual_claude_usd:.4f}",
+                   delta=f"-${cs.savings_vs_claude_usd:.4f}",
+                   delta_color="normal")
+        cc3.metric("If all-Claude Opus",   f"${cs.counterfactual_opus_usd:.4f}",
+                   delta=f"-${cs.savings_vs_opus_usd:.4f}",
+                   delta_color="normal")
+        cc4.metric("Savings vs Sonnet",    f"{cs.savings_vs_claude_pct:.1f}%")
+
+        # Per-family bar — local vs cloud-paid vs cloud-free
+        if cs.by_family:
+            st.caption("Cost by backend family")
+            st.bar_chart({k: v for k, v in cs.by_family.items() if v > 0} or {"(all local)": 0})
+
+        with st.expander(f"Per-backend breakdown ({len(cs.by_backend)} models)"):
+            sorted_backends = sorted(cs.by_backend.items(), key=lambda kv: -kv[1])
+            st.dataframe(
+                [
+                    {"model": k, "cost_usd": round(v, 6),
+                     "family": MODEL_PRICING.get(k, MODEL_PRICING.get("qwen3-coder-30b")).family}
+                    for k, v in sorted_backends
+                ],
+                use_container_width=True,
+            )
 
     # ----- OVERRIDE TABLE -----
     st.subheader("Override table — what the loop has learned")
