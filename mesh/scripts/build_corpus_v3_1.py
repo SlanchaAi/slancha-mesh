@@ -269,6 +269,27 @@ def _dolly_creative_extract(rec: dict) -> str | None:
     return instr[:1500] if instr else None
 
 
+def _aya_non_english_extract(rec: dict) -> str | None:
+    """CohereForAI/aya_dataset — accept only rows where the prompt is in a
+    non-English language (language_code != 'eng' / 'en'). Multilingual
+    source for the multilingual domain bucket."""
+    lang = (rec.get("language_code") or rec.get("language") or "").lower()
+    if lang in ("", "eng", "en", "english"):
+        return None
+    text = (rec.get("inputs") or "").strip()
+    return text[:1500] if text else None
+
+
+def _opus100_non_english_extract(rec: dict) -> str | None:
+    """Helsinki-NLP/opus-100 — translation pairs. Take the non-English
+    side as a multilingual seed prompt."""
+    t = rec.get("translation") or {}
+    for k, v in t.items():
+        if k != "en" and isinstance(v, str) and v.strip():
+            return v.strip()[:1500]
+    return None
+
+
 SUPPLEMENTAL_SOURCES: dict[str, list[SupplementalSource]] = {
     "code": [
         SupplementalSource(
@@ -316,6 +337,24 @@ SUPPLEMENTAL_SOURCES: dict[str, list[SupplementalSource]] = {
             split="train",
             extract=_glaive_extract,
             expected_domain="tool-use",
+        ),
+    ],
+    "multilingual": [
+        SupplementalSource(
+            name="aya-nonen",
+            hf_id="CohereForAI/aya_dataset",
+            config=None,
+            split="train",
+            extract=_aya_non_english_extract,
+            expected_domain="multilingual",
+        ),
+        SupplementalSource(
+            name="opus100-zh",
+            hf_id="Helsinki-NLP/opus-100",
+            config="en-zh",
+            split="train",
+            extract=_opus100_non_english_extract,
+            expected_domain="multilingual",
         ),
     ],
     "creative": [
