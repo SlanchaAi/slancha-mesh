@@ -122,6 +122,77 @@ def load_classified_index(path: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
+# mmbert's 6-head domain output uses an MMLU-style academic taxonomy
+# (psychology / history / philosophy / computer science / ...) which does
+# not align 1:1 with the operator's routing taxonomy (code / general /
+# reasoning / math / multilingual / creative / tool-use). The translator
+# below collapses mmbert's vocabulary onto the routing taxonomy so the
+# rebalancer can match domains correctly.
+#
+# Notes:
+#   - mmbert has NO concept of "code" — it emits "computer science".
+#   - mmbert has NO concept of "reasoning" — closest is general academic.
+#   - mmbert has NO concept of "creative" or "tool-use" — these come only
+#     from HF supplements (dolly creative, glaive function-calling).
+#   - mmbert's language head IS reliable for multilingual detection, so we
+#     promote non-English rows to domain="multilingual" regardless of
+#     mmbert's domain output. This is the single highest-confidence axis
+#     in the mmbert 6-head output.
+MMBERT_TO_ROUTING_DOMAIN: dict[str, str] = {
+    "computer science": "code",
+    "math": "math",
+    "physics": "math",
+    "engineering": "math",
+    "chemistry": "math",
+    # All academic subjects below collapse to "general" — they're
+    # conversational/knowledge-question prompts in practice.
+    "psychology":  "general",
+    "history":     "general",
+    "philosophy":  "general",
+    "law":         "general",
+    "biology":     "general",
+    "business":    "general",
+    "economics":   "general",
+    "health":      "general",
+    "other":       "general",
+}
+
+
+def translate_mmbert_signals(mmbert: dict[str, Any]) -> dict[str, Any]:
+    """Translate a mmbert signals dict into the routing taxonomy.
+
+    Output keys: domain (routing-style), difficulty, language, needs_tools,
+    plus all original mmbert fields kept under `mmbert_*` prefixes so
+    nothing's lost. Multilingual override: language != "en" → routing
+    domain = "multilingual" (mmbert language is the most reliable axis).
+    """
+    mm_domain = mmbert.get("domain", "other")
+    routing_domain = MMBERT_TO_ROUTING_DOMAIN.get(mm_domain, "general")
+    lang = mmbert.get("language", "en")
+    # mmbert may emit ISO codes like "de", "fr", "zh", "en", or "english"
+    is_english = lang in ("en", "english", "")
+    if not is_english:
+        routing_domain = "multilingual"
+    return {
+        "domain":      routing_domain,
+        "difficulty":  mmbert.get("difficulty", "medium"),
+        "language":    "other" if not is_english else "en",
+        "needs_tools": bool(mmbert.get("needs_tools", False)),
+        # Preserve full mmbert provenance under mmbert_* keys for posterity
+        # — useful for the dashboard panels that want confidence-band views
+        "mmbert_domain":               mm_domain,
+        "mmbert_domain_confidence":    mmbert.get("domain_confidence"),
+        "mmbert_difficulty_confidence": mmbert.get("difficulty_confidence"),
+        "mmbert_language":             lang,
+        "mmbert_language_confidence":  mmbert.get("language_confidence"),
+        "mmbert_is_jailbreak":         mmbert.get("is_jailbreak"),
+        "mmbert_jailbreak_confidence": mmbert.get("jailbreak_confidence"),
+        "mmbert_has_pii":              mmbert.get("has_pii"),
+        "mmbert_pii_confidence":       mmbert.get("pii_confidence"),
+        "mmbert_tool_confidence":      mmbert.get("tool_confidence"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Merge step — overlay mmbert signals onto v3.0 records
 # ---------------------------------------------------------------------------
@@ -133,10 +204,16 @@ def merge_with_classified(
 ) -> tuple[list[dict[str, Any]], int]:
     """Overlay classified[pid] signals onto v3 record; tag classifier provenance.
 
+    When the classified signals come from mmbert (academic-taxonomy 6-head),
+    they are TRANSLATED to the routing taxonomy via translate_mmbert_signals
+    before overlay. mmbert provenance (raw mmbert_* fields + confidences)
+    is preserved on the record so dashboards can still surface confidence
+    bands.
+
     Returns (merged_records, n_overlaid). Records whose prompt_id isn't in
     the classified index keep their heuristic signals (and classifier =
     "heuristic-v3"). Records whose signals were overlaid get
-    classifier = "mmbert-6h".
+    classifier = "mmbert-6h-translated".
     """
     out: list[dict[str, Any]] = []
     n_overlaid = 0
@@ -145,16 +222,44 @@ def merge_with_classified(
         new = dict(rec)
         signals = dict(new.get("signals", {}))
         if pid in classified:
-            # Overlay all fields the classified record provides
-            for k, v in classified[pid].items():
-                signals[k] = v
-            signals["classifier"] = "mmbert-6h"
+            # Detect mmbert academic taxonomy: presence of domain_confidence
+            # is the cheap discriminator. (Heuristic signals don't have it.)
+            raw = classified[pid]
+            if "domain_confidence" in raw or raw.get("domain") in MMBERT_TO_ROUTING_DOMAIN:
+                translated = translate_mmbert_signals(raw)
+                # Keep heuristic-only fields that translation doesn't cover
+                # (e.g., route_class), but let mmbert truth win on overlaps.
+                for k, v in translated.items():
+                    signals[k] = v
+                signals["classifier"] = "mmbert-6h-translated"
+            else:
+                # Non-mmbert classified source (e.g., a second mac-side pass).
+                # Copy through verbatim.
+                for k, v in raw.items():
+                    signals[k] = v
+                signals["classifier"] = "classified"
+            # Re-derive route_class from (possibly new) difficulty so it
+            # remains internally consistent with the overlaid signals.
+            signals["route_class"] = route_class_from_difficulty(
+                signals.get("difficulty", "medium")
+            )
             n_overlaid += 1
         else:
             signals.setdefault("classifier", "heuristic-v3")
         new["signals"] = signals
         out.append(new)
     return out, n_overlaid
+
+
+def route_class_from_difficulty(difficulty: str) -> str:
+    """Mirror of build_corpus_v3's route_class derivation, re-exposed
+    here so translated-mmbert records keep route_class self-consistent
+    with the (possibly new) difficulty value."""
+    if difficulty == "hard":
+        return "batch"
+    if difficulty == "medium":
+        return "standard"
+    return "hot_interactive"
 
 
 # ---------------------------------------------------------------------------
