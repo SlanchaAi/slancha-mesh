@@ -1,0 +1,34 @@
+# Tier-1 specialist: writing / personal voice (v7d iteration).
+# Qwen3.5-27B base + paul-v7d LoRA, served by vLLM with bitsandbytes
+# quantization on GB10 (sm_121). Currently serving on slancha-spark
+# 127.0.0.1:8003 with served_model_name="paul-voice".
+#
+# Registered as v0.1 mesh specialist per docs/SLANCHA_PROTOCOL_v0.1_DRAFT.md.
+model_id = "Qwen/Qwen3.5-27B"
+specialist_id = "paul-voice-v7d"
+domain = "writing"
+difficulty_tiers = ["easy", "medium", "hard"]
+languages = ["en"]
+required_backend = "vllm"
+requires_fp4 = false
+storage_gb = 54.0
+runtime_gb = 48.0  # gpu_memory_utilization=0.4 on 121GB unified pool
+min_vram_gb = 30.0
+context_window = 16384
+n_layers = 64
+hidden_size = 5120
+supports_lora_finetune = true
+upstream_model_card = "Qwen/Qwen3.5-27B"
+coverage_tier = 1
+
+# Endpoint location (slancha-spark localhost)
+endpoint_url = "http://127.0.0.1:8003/v1"
+served_model_name = "paul-voice"
+quantization = "bitsandbytes"
+
+# LoRA adapter
+lora_adapter_path = "/home/admin/finetuning/output/paul-v7d-qwen35-27b-lora"
+lora_version = "v7d"
+
+[estimated_tps_at]
+gb10 = 8.0  # bitsandbytes on Qwen3.5-27B is slow; measured smoke baseline
