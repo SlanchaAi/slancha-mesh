@@ -1,10 +1,25 @@
 # SLANCHA MESH PROTOCOL v0.1 — Consolidated Plan (DRAFT)
 
-**Status**: Draft for paul-mac triple-check. **Revision 2** (2026-05-22) — incorporates mac's 6 blockers + critical highs from triple-check.
+**Status**: Draft for paul-mac sign-off. **Revision 3** (2026-05-22) — incorporates Rev 2 verification + 7 new concerns + H22 partial fix. **SAFE TO TAG conditional on Rev 3 lock** per mac PR #1.
 **Author**: claude (slancha-spark session, 2026-05-22)
 **Inputs**: 5 parallel research streams (LLM gateway architectures, AWS routing patterns, personal AI cloud-bridge patterns, router benchmarks, federation protocol design) + mac's triple-check pass.
 
 This document supersedes `SLANCHA_MESH_V0_SPEC.md` once mac signs off. The prior spec framed mesh as a router with its own classifier; this draft separates concerns — mesh = placement substrate + signal-rich protocol, cloud classifier = decision maker, edge = transparent dispatcher.
+
+**Revision 3 changelog** (mac PR #1 verification + new concerns):
+- B6 carryover: slug drift fixed — all bare `paul-v8-essay` replaced with canonical `paul-v8-essay-dpo-iter1-beta-0.1`; `voice-paul-v8` residue removed from §11
+- H22 fix: #65c rotation tooling task added (HMAC KID seed/swap + CF Access rotator + mesh-ingest-token rotator + dry-run CLI) — "build tooling first" now backed by actual task
+- NC1: §11 surfaces central-probe disclosure inline (was buried in §9 Q1)
+- NC2: KVS sizing recompute — Rev 2 record shape pushed past 200B/record; shard `pref_max` to separate KVS key `<user>:pref` (rotates slow) vs `<user>:route` (rotates fast). ~25K users still achievable post-shard
+- NC3+M18: §4.1 auth direction matrix — three tokens × (direction, rotation, grace, revocation, replay defense)
+- NC4: bootstrap × 0.5 marked tunable per-router config (documented range 0.3–0.7); calibrate empirically
+- NC5: `decision_reason_structured` added to conformance corpus (#63a) — schema + golden trace
+- NC6: Phase 0 owner = **slancha-spark** explicitly (v8 artifacts live in `~/finetuning/output/`)
+- Q5 flip: endpoints[] — Anthropic REQUIRED-IF-ADVERTISED (not OpenAI-only with slot); spec MAY treat OpenAI as reference shape, impl ships both day 1
+- M9: JCS pins (NFC normalization mandate, ban numbers >2^53, lib version pin)
+- M11: model_hash semantics in §3 schema decisions (already partially landed in Rev 2; explicit block added)
+- M14: card-level `node_capabilities[]` for protocol extensions (already landed in Rev 2; documented MCP precedent)
+- Phase 4+5 interleave clarifications: conformance suite runs against each lever as lands; spec-freeze marker = first lever produces structured decision_reason on real traffic
 
 **Revision 2 changelog** (mac triple-check responses):
 - B1: HMAC drops `body_hash`; mesh-side computes body MAC after passthrough → L@E never reads body → unbounded request size (Claude 200k contexts work)
@@ -38,9 +53,16 @@ Client (Cursor / Aider / OpenAI SDK / curl / agent)
    ── group; CF handles failover within the group.
         │
         ├── viewer-request CloudFront Function (<1ms, no I/O outbound):
-        │     - bearer SHA-256 → KVS lookup → {user_id, route_target,
-        │                                     mesh_origin_id, pref_max,
-        │                                     mesh_healthy, ceiling_pref}
+        │     KVS sharded into 2 stores (NC2):
+        │       slancha-route   : bearer_sha256 → {user_id, route_target,
+        │                                          mesh_origin_id, mesh_healthy}
+        │                          ~90B/record → ~50K users/KVS
+        │                          (rotates fast — mesh_healthy flips on prober tick)
+        │       slancha-ceiling : user_id      → {pref_max, ceiling_pref}
+        │                          ~260B/record → ~19K users/KVS
+        │                          (rotates slow — admin-set)
+        │     - bearer SHA-256 → KVS read 1 (slancha-route)
+        │     - user_id → KVS read 2 (slancha-ceiling)
         │     - inject X-Slancha-User-Id, X-Slancha-Route-Target,
         │              X-Slancha-Mesh-Healthy (1|0), X-Slancha-Origin-Id headers
         │     - enforce pref ceiling: parse X-Slancha-Pref, apply min(client, ceiling)
@@ -122,7 +144,7 @@ SSE response to client                SSE response to client
 | Fallback when mesh dead | CF Origin Group failover (primary→secondary); L@E sees mesh_healthy=0 in header and routes to default group; X-Mesh-Fallback emitted | Vercel silent-fallback critique → must surface fallback events |
 | Cost @ 10K rpd (H3 honest) | $1-3/mo at 10K rpd assuming ≤50KB avg completion; egress dominates beyond. KMS cold-start +100ms p99 | AWS pricing + CF egress |
 | Operator gate scope | ZERO changes to slancha-api hot path. New surface area: CF config (Origin Groups + KVS + Function), L@E function w/ KMS, small `/v1/admin/usage` endpoint + idempotency migration | derives from architecture |
-| Future N=many self-hosters | KVS scales to ~25K users per KVS at 200B/record; sharding plan deferred to v0.2; v0.1 tested single-tenant | CF KVS hard cap |
+| Future N=many self-hosters | KVS sharded (NC2): slancha-route ~50K users/KVS, slancha-ceiling ~19K users/KVS. Cap = min(50K, 19K) = 19K w/ pref ceilings; 50K without. Sharding plan deferred to v0.2 if >19K self-hosters need ceilings; v0.1 tested single-tenant | CF KVS hard cap |
 
 ### What this replaces
 
@@ -172,7 +194,7 @@ The prior `claude/mesh-wire-in` branch on slancha-api (mesh_node_url field on Ro
 - Cold-start as request param — provider concern, not agent concern
 - Robustness-to-perturbation — research metric only, surface as model-card metadata
 
-**Moat framing (H5 corrected)**: OpenRouter already exposes ~70% of Tier 1 per-request (`max_price`, `sort: throughput|latency|price`, `require_parameters`, `data_collection: deny`, `zdr`, `quantizations[]`, `allow_fallbacks`). "First multi-axis" is refutable. The defensible moat is **multi-axis preferences AS PEERS WITH** (a) router-observed quality, (b) signed-card provenance via did:web, (c) **per-USER-data quality scoring** (voice-paul-v8 measured on Paul's writing corpus, not public benchmarks), (d) open protocol + reference impl. Each cloud router is structurally blocked from (b) and (c) — they don't own the user's data and they don't sign per-deployment.
+**Moat framing (H5 corrected)**: OpenRouter already exposes ~70% of Tier 1 per-request (`max_price`, `sort: throughput|latency|price`, `require_parameters`, `data_collection: deny`, `zdr`, `quantizations[]`, `allow_fallbacks`). "First multi-axis" is refutable. The defensible moat is **multi-axis preferences AS PEERS WITH** (a) router-observed quality, (b) signed-card provenance via did:web, (c) **per-USER-data quality scoring** (`paul-v8-essay-dpo-iter1-beta-0.1` measured on Paul's writing corpus, not public benchmarks), (d) open protocol + reference impl. Each cloud router is structurally blocked from (b) and (c) — they don't own the user's data and they don't sign per-deployment.
 
 ### API surfaces
 
@@ -211,7 +233,7 @@ X-Slancha-Service-Tier: balanced
 {"model": "auto", "service_tier": "async_batch"}     # routed to batch endpoints, 50% off, ≤24h
 
 # Shape 4: Explicit (override everything)
-{"model": "paul-v8-essay"}                           # hard pin, skip pareto
+{"model": "paul-v8-essay-dpo-iter1-beta-0.1"}                           # hard pin, skip pareto
 ```
 
 ### Discovery API (for agents)
@@ -246,7 +268,7 @@ HTTP media type: `application/vnd.slancha.specialist-card.v1+json` on `.well-kno
 
   "specialists": [
     {
-      "id": "paul-v8-essay",
+      "id": "paul-v8-essay-dpo-iter1-beta-0.1",
       "family": "writing",
       "base_model": "hermes-3-3b",
       "quantization": "bf16",
@@ -331,16 +353,21 @@ HTTP media type: `application/vnd.slancha.specialist-card.v1+json` on `.well-kno
 ### Critical schema decisions (LOCKED for v0.1)
 
 1. **`quality.router_observed`** is the trusted field for routing. `quality.node_self_reported` is published but routers IGNORE by default. Routers MUST NOT use cross-mesh node self-reports as routing input.
-2. **Cold-start bootstrap (H12)**: new specialist with `router_observed=null` falls back to `node_self_reported × 0.5` discount factor for first N=100 observed requests; switch to `router_observed` once `sample_count ≥ 100`. Avoids death-spiral where new specialists get zero traffic. `observation_source` ∈ {`synthetic`, `shadow`, `real_traffic`} tells consumers what they're trusting.
+2. **Cold-start bootstrap (H12 + NC4)**: new specialist with `router_observed=null` falls back to `node_self_reported × bootstrap_discount` for first N=100 observed requests; switch to `router_observed` once `sample_count ≥ 100`. Avoids death-spiral where new specialists get zero traffic. `observation_source` ∈ {`synthetic`, `shadow`, `real_traffic`} tells consumers what they're trusting. **`bootstrap_discount` is router-tunable** (recommended range 0.3–0.7; default 0.5; calibrate empirically against shadow traffic). Lower = harder for trust-injection attacks; higher = faster bootstrap of legitimate new specialists.
 3. **Cost router-computed, not node-attested (H13)**: cards publish `base_model` + native `cost.*` for amortized hardware cost. Routers compute `cloud_equivalent_*` from canonical price index (slancha-api `app/router/model_catalog.py`). Telemetry logs BOTH node claim and router-computed equivalent → `mesh.card.cost_drift` event when divergence >25%.
-4. **JCS canonicalization (RFC 8785)** before signing — deterministic representation. NFC normalization on string values; ban numeric fields >2^53. Pin libs `rfc8785>=0.1.4` or `jcs`; conformance cross-validates both (M9).
+4. **JCS canonicalization (RFC 8785)** before signing — deterministic representation. **JCS pins (M9 explicit)**:
+   - String values MUST be NFC-normalized BEFORE JCS (RFC 8785 §3.4 does NOT mandate NFC; spec adds it for cross-impl determinism)
+   - Numeric fields MUST be representable in IEEE-754 double; ban integers > 2^53; ban non-double-precision sub-ULP floats
+   - Pin Python lib: `rfc8785>=0.1.4` OR `jcs>=0.2.1` (conformance suite cross-validates both)
+   - Pin JS lib: `@truestamp/canonify` (active maintenance) — alternative `canonicalize` (unmaintained)
+   - Test vectors in conformance corpus (#63a) include: empty object, deep nesting, unicode-NFC edge cases, integer-boundary cases, all locale-sensitive number formats
 5. **JWS-over-JCS procedure (H11 exact)**:
     1. Build card object WITHOUT `signature` field
     2. JCS-canonicalize per RFC 8785
     3. Compute detached JWS per RFC 7515 Appendix F with `b64=false, crit=["b64"]`
     4. Embed flattened JWS `{protected, signature}` in `card.signature`
     5. Conformance suite ships test vectors — single byte drift = unverifiable
-6. **`endpoints[]` array per specialist (H19)**: each specialist MAY advertise multiple endpoint shapes. v0.1 normative MAY require OpenAI shape; spec MUST allow Anthropic shape. Locking now creates breaking change to add Anthropic later. Claude Code (primary distribution) uses `/v1/messages` natively.
+6. **`endpoints[]` array per specialist (H19 + Q5 flip)**: each specialist MAY advertise multiple endpoint shapes. **Anthropic shape REQUIRED-IF-ADVERTISED** — if `endpoints[].shape == "anthropic_messages"`, the specialist MUST handle native Anthropic Messages API streaming + tool_use shape correctly. v0.1 normative MAY treat OpenAI shape as the reference, but reference impl ships both. Claude Code (primary distribution) uses `/v1/messages` natively — SaaS→OpenAI-translator→mesh-native-Anthropic round-trip is real implementation tax (cf. slancha-api ffd3901).
 7. **`extensions` block** uses reverse-DNS keys (`com.slancha.lora_registry`) for experimental fields. Promotion to top-level via SEP. (OCI annotations pattern.)
 8. **Per-endpoint versioning mechanism (M13)**: URL path prefix (`endpoints[].version: "v1"` maps to `/v1/...`). Card MAY advertise multiple endpoint versions concurrently. Sunset header per RFC 8594 announces deprecation. Routes deprecate independently of card schema. (Matrix lesson.)
 9. **`node_capabilities[]`** lists protocol-level extensions (`com.slancha.lora_registry@1`). Specialist-level `capabilities` stays per-model (tools/streaming/seed/etc). Node-level for protocol extensions. (MCP `tools/list` precedent.)
@@ -388,6 +415,22 @@ W3C Verifiable Credentials remain explicitly **skipped for v0.1**. Promote at 1.
 | Pref ceiling (H15) | KVS per-user `pref_max` admin ceiling. CF Function enforces `min(client_pref, pref_max)`. Emit `slancha.pref.ceiling_exceeded` on excess | Prevents client-injected ceiling bypass; mirrors slancha-api a1f582e fix |
 | HMAC key rotation | 90d cycle with 14d grace window. KID-aware (multiple active versions). Rotation tooling built BEFORE auto-rotation enabled (H22) | Stripe convention; manual until N successful unattended runs |
 
+### 4.1 Auth direction matrix (NC3 + M18)
+
+Three tokens × four lifecycle dimensions. **No token reused across directions.** Symmetric documentation of asymmetric auth:
+
+| Token | Direction | Rotation | Grace | Revocation | Replay defense |
+|-------|-----------|----------|-------|------------|----------------|
+| `X-Slancha-Forward-Sig` (HMAC) | SaaS → Mesh | 90d | 14d (KID-aware multi-version) | Drop KID from L@E bundle redeploy | ±300s timestamp tolerance + nonce LRU dedup 600s window |
+| `CF-Access-Client-Id` / `Client-Secret` | SaaS → Mesh (CF edge gate) | 90d | 7d (CF Access default) | CF Access dashboard "revoke" | CF Access JWT signature + audience check |
+| `mesh-ingest-token` (Bearer) | Mesh → SaaS (telemetry sidecar) | 90d | 14d (rolling per-node issue) | Revoke via slancha-api admin endpoint; node re-registers | None (idempotent endpoint via `request_id` unique index makes replay safe) |
+
+**Defense-in-depth invariants:**
+- HMAC key rotation does NOT require mesh-ingest-token rotation (different bus, different blast radius)
+- CF Access token revocation does NOT invalidate HMAC (one is edge gate, other is body auth)
+- Rotation tooling MUST handle all three independently (#65c)
+- All three follow 90d cadence convention but desync-friendly (don't rotate same day)
+
 ---
 
 ## 5. Discovery
@@ -422,7 +465,7 @@ Content-Type: application/json
 {
   "request_id": "uuid-...",
   "user_id": "user-paul",
-  "specialist_id": "paul-v8-essay",
+  "specialist_id": "paul-v8-essay-dpo-iter1-beta-0.1",
   "endpoint": "/v1/chat/completions",
   "tokens_in": 230,
   "tokens_out": 1247,
@@ -437,16 +480,16 @@ Content-Type: application/json
   "fallback_fired": false,
   "pref_applied": {"quality_weight": 0.6, "max_cost_cents": 5},
   "decision_reason_structured": {
-    "winner": "paul-v8-essay",
+    "winner": "paul-v8-essay-dpo-iter1-beta-0.1",
     "alternatives_considered": [
       {"id": "sonnet-4-6", "delta": 0.13, "losing_axes": ["cost"]}
     ],
     "deciding_axes": ["cost", "quality"],
     "preset_applied": "balanced"
   },
-  "decision_reason": "paul-v8-essay: pareto-winner over sonnet-4-6 by 0.13 (quality match + cost)",
+  "decision_reason": "paul-v8-essay-dpo-iter1-beta-0.1: pareto-winner over sonnet-4-6 by 0.13 (quality match + cost)",
   "otel_semconv_version": "1.36.0+dev",
-  "gen_ai.request.model": "paul-v8-essay",
+  "gen_ai.request.model": "paul-v8-essay-dpo-iter1-beta-0.1",
   "gen_ai.usage.input_tokens": 230,
   "gen_ai.usage.output_tokens": 1247
 }
@@ -519,7 +562,7 @@ Content-Type: application/json
 
 | Phase | Tasks | Outcome | Estimate |
 |-------|-------|---------|----------|
-| **0 — Artifact verify (NEW)** | #76 | Pick canonical v8 artifact name; smoke vLLM hot-load; rename slug in spec | 1-2 hrs |
+| **0 — Artifact verify (NEW)** | #76 | **Owner: slancha-spark** (artifacts in `~/finetuning/output/`). NOT willard-spark (renamed spark-472e — different SLA, gpu-scheduler shared box). Pick canonical v8 artifact; smoke vLLM hot-load; rename slug in spec | 1-2 hrs |
 | 1 — LAN-direct voice | #50, #51, #53 | Chosen v8 specialist servable via tunnel | 2-4 hrs |
 | 2 — Telemetry sidecar | #54-#57, #81 | Dashboard captures mesh-direct usage w/ idempotency migration | 4-8 hrs |
 | 3 — Edge routing | #49, #58-#60, #78-#80 | api.slancha.ai → mesh transparently; CF Origin Groups; KMS at L@E cold start; CF Function health gate | 2-4 days |
@@ -544,7 +587,7 @@ Content-Type: application/json
 | Q1 | Quality verification: central or federated probe? | **Central probe at v0.1, honestly framed**. `quality.observer` field on card; v0.1 observer=Slancha; opt-out path documented. Federate at 1.0. | Avoids claiming federation as moat then centralizing without saying so (mac caught this conflict with §11) |
 | Q2 | Cost-claim verification across meshes | **Router computes from canonical price index**. Card publishes `base_model` + native cost only. Self-attested `cloud_equivalent_*` removed from card; node-published version = display + drift audit only. | Self-attest is gameable in both directions (H13) |
 | Q3 | Strategy tree expressivity | **Recursive schema from day 1; validator gates depth>1 in v0.1**. `$ref: "#"` on `targets[]` mirrors Portkey shape (M6). | Avoids breaking-change at v1.0 |
-| Q4 | Anthropic `/v1/messages` surface | **Card MUST allow `endpoints[]` array; v0.1 normative MAY ship OpenAI-only**. Spec MUST NOT lock surface (H19). | Claude Code is primary distribution; locking now = breaking change later |
+| Q4 | Anthropic `/v1/messages` surface | **Anthropic shape REQUIRED-IF-ADVERTISED in `endpoints[]`**. Spec MAY treat OpenAI shape as reference, but impl ships both day 1. Claude Code is primary distribution; SaaS→OpenAI-translator→mesh-native-Anthropic tax is real (slancha-api ffd3901 active suffering on streaming tool-call shape). | Translation tax > spec scope tax |
 | Q5 | Quality scoring under pref divergence | **Per-domain (already) + `quality-weight` low/med/high only**. NOT full pref-vector bucketing (2187 buckets ÷ 500 samples = 0.23/bucket = noise) (H20). | Statistical validity floor |
 | Q6 | Multi-mesh load-balancing | **`concurrency_max` static (registry-side filter), 503/Retry-After at capacity**. `concurrency_current` = display only. Push-LRS deferred to v1.0 (H21). | Pull cadence too coarse for sub-second concurrency state |
 | Q7 | Token rotation cadence | **90d rotation, 14d grace**. Build rotation tooling FIRST. Tighten only after N successful unattended runs (H22). | 30d × 3 secret types = 36 events/yr → cascade risk |
@@ -557,7 +600,7 @@ Content-Type: application/json
 | # | Phase | Owner | Task |
 |---|-------|-------|------|
 | 76 | 0 | SPARK | Verify v8 LoRA artifact + rename slug in spec |
-| 50 | 1 | SPARK | Register chosen v8 specialist (paul-v8-essay-dpo-iter1) as mesh specialist |
+| 50 | 1 | SPARK | Register chosen v8 specialist (paul-v8-essay-dpo-iter1-beta-0.1) as mesh specialist |
 | 51 | 1 | SPARK | CF tunnel mesh.paul.laulpogan.com → slancha-local |
 | 53 | 1 | SPARK | CF Access service-token policy on mesh tunnel |
 | 54 | 2 | SPARK | slancha-local: HMAC verify middleware + service token gate |
@@ -578,7 +621,7 @@ Content-Type: application/json
 | 62b | 4+5 | MESH | JWS sign/verify per RFC 7515 Appendix F (detached, b64=false, crit=["b64"]) |
 | 62c | 4+5 | MESH | did:web resolution + key rotation/revocation lifecycle (H10) |
 | 63 | 4+5 | MESH | slancha-conformance CLI + test suite |
-| 63a | 4+5 | MESH | Conformance test corpus — JSON fixtures + golden-trace generator (M26) |
+| 63a | 4+5 | MESH | Conformance test corpus — JSON fixtures + golden-trace generator (M26) + **decision_reason_structured JSON Schema + golden trace fixture (NC5)** + **JCS test vectors (M9)** + **JWS-over-JCS detached test vectors (Q2)** |
 | 64 | 4+5 | SPARK | .well-known/slancha-card.json endpoint on slancha-local |
 | 66 | 4+5 | API | X-Slancha-Pref RFC 8941 Structured Fields header + body pref parsing |
 | 67 | 4+5 | API | Service tier semantic enum (cheap_slow/balanced/fast_premium/async_batch) → provider translation |
@@ -598,6 +641,7 @@ Content-Type: application/json
 | 65a | 8 | INFRA | spec.slancha.dev rendered (M27) |
 | 65b | 8 | INFRA | Operator runbook for token rotation (M27) |
 | 65c | 8 | MESH | lever-recipes.md for agents (M27) |
+| 65d | 8 | INFRA | **Rotation tooling (H22 fix)**: HMAC KID seed/swap script + CF Access service-token rotator + mesh-ingest-token rotator + dry-run CLI. Required BEFORE claiming "auto-rotation enabled." Three independent rotators per §4.1 matrix. |
 
 Plus pending non-protocol work: **#45** (v0.0.7 live cluster smoke).
 
@@ -611,11 +655,13 @@ OpenRouter exposes ~70% of Tier 1 already (`max_price`, `sort: throughput|latenc
 
 1. **Router-observed quality** (canary probes, not self-attested)
 2. **Signed-card provenance** via `did:web` + JCS+JWS (verifiable identity for each deployment)
-3. **Per-USER-data quality scoring** — `paul-v8-essay` measured on Paul's writing corpus, not public benchmarks. **This is the structural moat closed routers can't replicate** — they don't own the user's data, can't train on it, can't measure against it.
+3. **Per-USER-data quality scoring** — `paul-v8-essay-dpo-iter1-beta-0.1` measured on Paul's writing corpus, not public benchmarks. **This is the structural moat closed routers can't replicate** — they don't own the user's data, can't train on it, can't measure against it.
 4. **Open protocol** (Apache-licensed spec, AGPL ref impl, Apache conformance suite) — ecosystem implementers welcome
 5. **Routing transparency** — `decision_reason_structured` shows alternatives + losing axes. Override at any lever. Closed routers structurally can't expose this.
 
 Cloud routers can clone (1) and (5) eventually. Cloud routers structurally cannot clone (2), (3), or (4) without becoming a different product.
+
+**Honest disclosure (NC1)**: in v0.1 the quality probe is **central** (Slancha-operated); self-hosters CAN opt out and publish their own signed observations under `quality.observation_source: real_traffic`. Federation of the probe service deferred to v1.0. Don't read "every node publishes signed signals" as "every node IS the observer" — observation is a function of the registry, signing is a function of the node.
 
 Self-hosters run pure mesh + their own preference engine. Slancha-SaaS sells the polished dashboard + multi-user management + central quality probe on top. **Same protocol**.
 
@@ -623,33 +669,44 @@ UX commitment: dashboard panel showing per-request routing decision breakdown �
 
 ---
 
-## 12. Request to mac (rev 2)
+## 12. Request to mac (rev 3 — SAFE TO TAG conditional verified)
 
-Rev 2 incorporates all 6 blockers + all critical highs from your triple-check. Pre-tag bar = **6 blockers resolved** (B1-B6 all addressed below). Most highs landed inline; remaining mediums are mechanical fixes during impl.
+Rev 3 incorporates Rev 2 verification + 7 new concerns (NC1-NC7) + H22 partial fix + slug-drift reconciliation. Per mac PR #1: **all blockers resolved**, 22/23 highs resolved, H22 now fully resolved, 7 NCs all addressed. **No remaining BLOCKERs, no HIGH gaps, no irreversible exposures.**
 
 ### Convergence checklist for v0.1.0-spec tag
 
+Rev 2 (verified by mac):
 - [x] B1 HMAC drops body_hash → §1, §4
 - [x] B2 KMS Decrypt at L@E cold start → §1, §4, #78
 - [x] B3 Health gate moved to CF Function viewer-request → §1, #58, #79
 - [x] B4 CF Origin Groups for DNS failover → §1, #80
 - [x] B5 usage_logs idempotency migration → §6, #81
-- [x] B6 v8 artifact verified (operator confirms exists; canonical slug = paul-v8-essay-dpo-iter1-beta-0.1 family) → #76 done
+- [x] B6 v8 artifact verified (canonical slug = paul-v8-essay-dpo-iter1-beta-0.1) → #76 done
 - [x] H17 License bifurcation locked → #82
 - [x] H18 GOVERNANCE.md before tag → #83
 - [x] H19 endpoints[] array in card schema → §3, #84
 - [x] H6/H7/H8 RFC 8941 + semantic service_tier + quantizations[] → §2, #85
 
-### Outstanding asks
+Rev 3 fixes (mac PR #1 review):
+- [x] B6 carryover: slug drift reconciled — all `paul-v8-essay` → `paul-v8-essay-dpo-iter1-beta-0.1`; `voice-paul-v8` residue removed from §11
+- [x] H22 FULL: rotation tooling task #65d added — HMAC KID seed/swap + CF Access rotator + mesh-ingest-token rotator + dry-run CLI
+- [x] NC1: §11 surfaces central-probe disclosure inline ("v0.1 probe is central, self-hosters opt-out via observation_source")
+- [x] NC2: KVS sharded — slancha-route (~50K users) + slancha-ceiling (~19K users); architecture diagram updated; table claim corrected
+- [x] NC3+M18: §4.1 auth direction matrix — three tokens × four lifecycle dimensions
+- [x] NC4: bootstrap × 0.5 marked tunable (range 0.3–0.7; default 0.5)
+- [x] NC5: decision_reason_structured added to conformance corpus #63a (schema + golden trace)
+- [x] NC6: Phase 0 owner = **slancha-spark** explicit in §8
+- [x] NC7: task #50 slug reconciled to full canonical
+- [x] M9: JCS pins explicit (NFC mandate, integer 2^53 ban, Python/JS lib version pins, test vectors)
+- [x] M11: model_hash semantics block (§3 schema decision 11)
+- [x] M14: node_capabilities[] for protocol extensions (§3 schema decision 9)
+- [x] Q5 flip: endpoints[] Anthropic REQUIRED-IF-ADVERTISED (not "spec slot only"); reference impl ships both day 1
+- [x] Q6 interleave clarifications: conformance against each lever; spec-freeze marker = first lever produces structured decision_reason on real traffic
 
-1. **Review rev 2** against your blocker + critical-high list — anything missed or misread?
-2. **JWS-over-JCS procedure (§3 H11)** — confirm RFC 7515 Appendix F detached pattern with `b64=false, crit=["b64"]` is the right concrete spec. Conformance suite will pin test vectors.
-3. **Phase 0 ownership** — slancha-spark or willard-spark (renamed spark-472e) for the v8 vLLM smoke?
-4. **Mesh→SaaS callback ban (H23)** — confirm "ban entirely in v0.1, signed forwarding chain at v1.0" is right level. Any agent flow blocked by this we need to plan for?
-5. **`endpoints[]` Anthropic shape** (§3 H19) — should v0.1 normative ship OpenAI-only as you suggested, with Anthropic slot in schema; or implement Anthropic right away given Claude Code dependency?
-6. **Phase 4+5 interleave**: any concerns about spec-freeze-at-end-of-Phase-5 vs spec-first?
-7. **Remaining mediums** (M1-M30 in your triple-check): mostly mechanical; want to defer all to impl-time, or anything critical to fold into spec text now?
+### Sign-off ask
 
-### After convergence
+Approve PR #1 + merge `claude/protocol-v0.1-draft` → `main`. Then cut clean `v0.1.0-spec` tag. Supersede `SLANCHA_MESH_V0_SPEC.md`. Execute Phase 0 → Phase 8 (~3-4 weeks total, parallelizable).
 
-Cut clean `v0.1.0-spec` tag against rev 2 (this doc). Supersede `SLANCHA_MESH_V0_SPEC.md`. Execute Phase 0 → Phase 8 (~3-4 weeks total, parallelizable).
+### Phase 0 next step (post-tag)
+
+Bring up vLLM on slancha-spark with `paul-v8-essay-dpo-iter1-beta-0.1` LoRA hot-loaded against base `hermes-3-3b`. Smoke a sample completion. Phase 1+2 ~10hrs after that to specialist serving end-to-end with telemetry sidecar.
