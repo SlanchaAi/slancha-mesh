@@ -69,7 +69,17 @@ class AllocationEvent(_Event):
     suggestions: dict[NodeId, SpecialistId | None]
 
 
-Event = HeartbeatEvent | NodeLeftEvent | AllocationEvent
+class QualityObservationEvent(_Event):
+    """Phase 6 — one router-observed quality score for a specialist."""
+
+    kind: Literal["quality_observation"] = "quality_observation"
+    specialist_id: SpecialistId
+    score: float = Field(..., ge=0.0, le=5.0)
+    sample_count: int = Field(..., ge=0)
+    observation_source: Literal["synthetic", "shadow_traffic", "real_traffic"]
+
+
+Event = HeartbeatEvent | NodeLeftEvent | AllocationEvent | QualityObservationEvent
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +155,48 @@ class MeshRegistry:
         self._events.append(
             AllocationEvent(ts=datetime.now(timezone.utc), strategy=strategy, suggestions=suggestions)
         )
+
+    def record_quality_observation(
+        self,
+        *,
+        specialist_id: SpecialistId,
+        score: float,
+        sample_count: int,
+        observation_source: Literal["synthetic", "shadow_traffic", "real_traffic"],
+        observed_at: datetime | None = None,
+    ) -> tuple[float | None, "QualityObservationEvent"]:
+        """Append a quality observation + update the specialist's card.
+
+        Returns (prior_score_or_None, event). Callers (the service-side
+        admin endpoint) use prior_score to compute a DriftEvent via
+        mesh.quality_probe.detect_drift.
+
+        Cards are frozen=True, so we replace the existing card with a
+        new instance carrying the updated quality fields. Snapshot
+        consumers see the new values from the next /registry call.
+        """
+        when = observed_at or datetime.now(timezone.utc)
+        ev = QualityObservationEvent(
+            ts=when,
+            specialist_id=specialist_id,
+            score=score,
+            sample_count=sample_count,
+            observation_source=observation_source,
+        )
+        self._events.append(ev)
+
+        prior = None
+        old_card = self._catalog.get(specialist_id)
+        if old_card is not None:
+            prior = old_card.quality_router_observed
+            self._catalog[specialist_id] = old_card.model_copy(
+                update={
+                    "quality_router_observed": score,
+                    "quality_sample_count": (old_card.quality_sample_count or 0) + sample_count,
+                    "quality_observation_source": observation_source,
+                }
+            )
+        return prior, ev
 
     @property
     def events(self) -> list[Event]:

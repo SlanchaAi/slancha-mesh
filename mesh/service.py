@@ -32,6 +32,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from mesh.models import DomainId, NetworkLink, NodeId, SpecialistId
+from mesh.quality_probe import detect_drift
 from mesh.registry import (
     HeartbeatEvent,
     HeartbeatPostRequest,
@@ -108,6 +109,26 @@ class ProbeNetworkResponse(BaseModel):
     snapshot_ts: datetime
     nodes_observed: int
     network_views: dict[NodeId, dict[NodeId, NetworkLink]] = Field(default_factory=dict)
+
+
+class QualityObservationPostRequest(BaseModel):
+    """Body for `POST /quality_observation` — Phase 6."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    specialist_id: SpecialistId
+    score: float = Field(..., ge=0.0, le=5.0)
+    sample_count: int = Field(..., ge=1)
+    observation_source: str = Field(..., pattern="^(synthetic|shadow_traffic|real_traffic)$")
+    observed_at: datetime | None = None
+
+
+class QualityObservationResponse(BaseModel):
+    """Ack + optional DriftEvent for `POST /quality_observation`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    ack: bool
+    prior_score: float | None
+    drift: dict | None = None
 
 
 class HealthResponse(BaseModel):
@@ -223,6 +244,74 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
     )
     def get_health() -> HealthResponse:
         return HealthResponse(status="ok", auth_required=_expected_token() is not None)
+
+    # ------------------------------------------------------------------
+    # Phase 6 — router-observed quality observations + drift alerts
+    # ------------------------------------------------------------------
+
+    @app.post(
+        "/quality_observation",
+        response_model=QualityObservationResponse,
+        summary="Record one router-observed quality score for a specialist",
+    )
+    def post_quality_observation(
+        body: QualityObservationPostRequest,
+        _: Annotated[None, Depends(verify_node_token)],
+    ) -> QualityObservationResponse:
+        """Write a probe-set-derived score into a specialist's card.
+
+        Updates SpecialistCard.quality_router_observed +
+        quality_sample_count + quality_observation_source on the matching
+        catalog entry. Compares against the prior router_observed
+        score; emits a `mesh.quality.drift` log line + returns a
+        DriftEvent in the response when |delta| > 0.5.
+
+        Caller is typically `python -m mesh.quality_probe` (CLI) but any
+        operator-controlled probe runner can write here. Auth: same
+        SLANCHA_NODE_TOKEN as the rest of the registry.
+        """
+        prior, _ev = reg.record_quality_observation(
+            specialist_id=body.specialist_id,
+            score=body.score,
+            sample_count=body.sample_count,
+            observation_source=body.observation_source,
+            observed_at=body.observed_at,
+        )
+        drift = detect_drift(
+            prior=prior,
+            current=body.score,
+            specialist_id=body.specialist_id,
+        )
+        if drift is not None:
+            # Structured log line so CloudWatch / Langfuse can alert on it.
+            import logging
+
+            logging.getLogger("mesh.quality").warning(
+                "mesh.quality.drift specialist=%s prior=%.3f new=%.3f delta=%.3f direction=%s threshold=%.3f",
+                drift.specialist_id,
+                drift.prior_score,
+                drift.new_score,
+                drift.delta,
+                drift.direction,
+                drift.threshold,
+            )
+
+        return QualityObservationResponse(
+            ack=True,
+            prior_score=prior,
+            drift=(
+                {
+                    "specialist_id": drift.specialist_id,
+                    "prior_score": drift.prior_score,
+                    "new_score": drift.new_score,
+                    "delta": drift.delta,
+                    "direction": drift.direction,
+                    "threshold": drift.threshold,
+                }
+                if drift is not None
+                else None
+            ),
+        )
 
     # ------------------------------------------------------------------
     # v0.0.6 — cluster-wide GPU coordination (#46)
