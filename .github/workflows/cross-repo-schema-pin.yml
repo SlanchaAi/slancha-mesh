@@ -1,0 +1,83 @@
+name: cross-repo-schema-pin
+
+# Validates the canonical fixture at mesh/contracts/mesh_usage_event.json
+# against the slancha-api MeshUsageEvent Pydantic.
+#
+# Catches drift in either direction:
+#   - someone edits the fixture in a wire-incompatible way → this fails
+#   - someone tightens MeshUsageEvent in slancha-api → this fails
+#
+# Companion tests in slancha-api and slancha-local pin the relationship
+# from those sides.
+
+on:
+  pull_request:
+    paths:
+      - "mesh/contracts/**"
+      - "mesh/tests/test_cross_repo_usage_event.py"
+      - "mesh/quality_probe.py"
+      - "mesh/select.py"
+      - "mesh/models.py"
+      - "mesh/validate_card.py"
+      - "mesh/catalog/**"
+      - ".github/workflows/cross-repo-schema-pin.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: cross-repo-schema-pin-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout slancha-mesh
+        uses: actions/checkout@v5
+        with:
+          path: slancha-mesh
+
+      - name: Checkout slancha-api (sibling for Pydantic import)
+        uses: actions/checkout@v5
+        with:
+          repository: SlanchaAi/slancha-api
+          # main is canonical here; the substrate work is on
+          # feat/mesh-substrate today + will land on main when shipped.
+          ref: main
+          path: slancha-api
+          # Cross-repo PR-validation: if a slancha-mesh PR depends on an
+          # unmerged slancha-api change, override with a workflow_dispatch
+          # input or a temporary ref override here.
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install mesh deps
+        working-directory: slancha-mesh
+        run: |
+          pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Install slancha-api Pydantic-only deps
+        # The schema-pin test imports app.schemas.mesh_usage which has
+        # zero slancha-api-specific imports (just pydantic). So we don't
+        # need to pip-install slancha-api itself — pydantic is already
+        # pulled in by slancha-mesh.
+        run: pip install pydantic
+
+      - name: Run cross-repo schema-pin
+        working-directory: slancha-mesh
+        env:
+          SLANCHA_API_PATH: ${{ github.workspace }}/slancha-api
+        run: |
+          pytest -q mesh/tests/test_cross_repo_usage_event.py
+
+      - name: Validate catalog (substrate sanity)
+        working-directory: slancha-mesh
+        run: |
+          python -m mesh.validate_card --strict
