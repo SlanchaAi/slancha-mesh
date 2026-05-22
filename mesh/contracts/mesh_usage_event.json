@@ -1,0 +1,58 @@
+{
+  "_meta": {
+    "fixture_version": "1.0.0",
+    "spec_section": "§6 telemetry contract",
+    "purpose": "Cross-repo golden trace for slancha-local → slancha-api wire shape. CHANGES TO THIS FILE ARE WIRE-PROTOCOL CHANGES.",
+    "consumed_by": [
+      "slancha-api/tests/test_cross_repo_mesh_usage.py (validates via MeshUsageEvent Pydantic)",
+      "slancha-local/tests/integration/test_usage_sidecar_contract.py (emitter side asserts payload keys + types)",
+      "slancha-mesh/mesh/tests/test_cross_repo_usage_event.py (this-repo cross-check when sibling slancha-api on disk)"
+    ]
+  },
+
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "user_id": "00000000-0000-0000-0000-000000000aaa",
+  "endpoint": "/v1/chat/completions",
+  "model": "paul-voice-v8",
+  "route": "mesh",
+  "tokens_in": 230,
+  "tokens_out": 1247,
+  "latency_ms": 4830,
+  "status_code": 200,
+
+  "ttft_ms": 124,
+  "tokens_per_second": 258.13,
+  "specialist_id": "paul-v8-essay-dpo-iter1-beta-0.1",
+  "cost_cents": 0,
+  "cloud_equivalent_cost_cents": 7,
+  "fallback_fired": false,
+
+  "pref_applied": {
+    "quality_weight": 0.6,
+    "max_cost_cents": 5,
+    "service_tier": "balanced"
+  },
+
+  "decision_reason": {
+    "winner": "paul-v8-essay-dpo-iter1-beta-0.1",
+    "alternatives_considered": [
+      {
+        "id": "paul-voice-v7d",
+        "delta": 0.13,
+        "losing_axes": ["quality"]
+      },
+      {
+        "id": "claude-sonnet-4-7",
+        "delta": 0.27,
+        "losing_axes": ["cost", "privacy"]
+      }
+    ],
+    "deciding_axes": ["quality", "latency"],
+    "preset_applied": "balanced"
+  },
+
+  "gen_ai.request.model": "paul-voice-v8",
+  "gen_ai.usage.input_tokens": 230,
+  "gen_ai.usage.output_tokens": 1247,
+  "otel_semconv_version": "1.36.0+dev"
+}
