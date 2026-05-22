@@ -9,7 +9,7 @@ languages = ["en"]
 required_backend = "vllm"
 requires_fp4 = false
 storage_gb = 54.0
-runtime_gb = 48.0
+runtime_gb = 60.0  # bf16 weights (54) + KV cache + LoRA overhead; respects runtime>=storage invariant
 min_vram_gb = 30.0
 context_window = 16384
 n_layers = 64
