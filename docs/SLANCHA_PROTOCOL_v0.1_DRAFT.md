@@ -8,7 +8,7 @@ This document supersedes `SLANCHA_MESH_V0_SPEC.md` once mac signs off. The prior
 
 **Revision 3 changelog** (mac PR #1 verification + new concerns):
 - B6 carryover: slug drift fixed — all bare `paul-v8-essay` replaced with canonical `paul-v8-essay-dpo-iter1-beta-0.1`; `voice-paul-v8` residue removed from §11
-- H22 fix: #65c rotation tooling task added (HMAC KID seed/swap + CF Access rotator + mesh-ingest-token rotator + dry-run CLI) — "build tooling first" now backed by actual task
+- H22 fix: #65d rotation tooling task added (HMAC KID seed/swap + CF Access rotator + mesh-ingest-token rotator + dry-run CLI) — "build tooling first" now backed by actual task
 - NC1: §11 surfaces central-probe disclosure inline (was buried in §9 Q1)
 - NC2: KVS sizing recompute — Rev 2 record shape pushed past 200B/record; shard `pref_max` to separate KVS key `<user>:pref` (rotates slow) vs `<user>:route` (rotates fast). ~25K users still achievable post-shard
 - NC3+M18: §4.1 auth direction matrix — three tokens × (direction, rotation, grace, revocation, replay defense)
@@ -405,7 +405,7 @@ W3C Verifiable Credentials remain explicitly **skipped for v0.1**. Promote at 1.
 |-------|-----------|-----|
 | Node identity | `did:web:<domain>` with key rotation/revocation (§3 rotation block) | Rides on existing DNS+TLS, no CA bureaucracy |
 | Card signing | JWS over JCS-canonicalized JSON per RFC 7515 Appendix F detached pattern (§3 procedure) | Prevents registry injection + impersonation |
-| Quality signals | Router-observed (canary probes); cold-start uses `node_self_reported × 0.5` bootstrap | Self-attested scores are gameable; observation is verifiable; cold-start bootstrap avoids death spiral |
+| Quality signals | Router-observed (canary probes); cold-start uses `node_self_reported × bootstrap_discount` (tunable 0.3–0.7, default 0.5) | Self-attested scores are gameable; observation is verifiable; cold-start bootstrap avoids death spiral |
 | Cost signals | Router-computed `cloud_equivalent_*` from canonical price index. Node `cost.*` = native amortized only | Self-attested cross-mesh cost is gameable in BOTH directions (inflate to win privacy moat, deflate to win pareto) |
 | Privacy attestations | Self-attested in v0.1 with `[unverified]` UI badge; hardware attestation (TPM/SEV/TDX) ONLY in `extensions.com.slancha.privacy_attestation` | TEE formats churn; GB10 has no HW attestation per NVIDIA |
 | Last-mile auth (SaaS→mesh) | CF Access service token + HMAC `X-Slancha-Forward-Sig` (HMAC over user_id+timestamp+nonce+route_target+origin_id; ±300s replay window; nonce LRU dedup 600s) | Tunnel URL alone is not auth (Ollama 175k exposed hosts) |
@@ -428,7 +428,7 @@ Three tokens × four lifecycle dimensions. **No token reused across directions.*
 **Defense-in-depth invariants:**
 - HMAC key rotation does NOT require mesh-ingest-token rotation (different bus, different blast radius)
 - CF Access token revocation does NOT invalidate HMAC (one is edge gate, other is body auth)
-- Rotation tooling MUST handle all three independently (#65c)
+- Rotation tooling MUST handle all three independently (#65d)
 - All three follow 90d cadence convention but desync-friendly (don't rotate same day)
 
 ---
