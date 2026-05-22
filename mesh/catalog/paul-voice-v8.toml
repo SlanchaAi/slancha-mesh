@@ -1,0 +1,42 @@
+# Tier-1 specialist: writing / personal voice (v8 DPO iteration).
+# paul-v7d-qwen35-27b-merged base + paul-v8-essay-dpo-iter1-beta-0.1 LoRA,
+# served by serve_v8_hf.py (HF transformers, NOT vLLM) on slancha-spark
+# 127.0.0.1:8004 with served_model_name="paul-voice-v8".
+#
+# Registered as v0.1 mesh specialist per docs/SLANCHA_PROTOCOL_v0.1_DRAFT.md.
+# canonical artifact = paul-v8-essay-dpo-iter1-beta-0.1
+model_id = "paul-v7d-qwen35-27b-merged"
+specialist_id = "paul-voice-v8"
+domain = "writing"
+difficulty_tiers = ["easy", "medium", "hard"]
+languages = ["en"]
+required_backend = "hf_transformers"
+requires_fp4 = false
+storage_gb = 54.0
+runtime_gb = 58.0  # bf16 27B + adapter overhead, HF backend
+min_vram_gb = 56.0
+context_window = 8192
+n_layers = 64
+hidden_size = 5120
+supports_lora_finetune = true
+upstream_model_card = "local:paul-v7d-qwen35-27b-merged"
+coverage_tier = 1
+
+# Endpoint location (slancha-spark localhost)
+endpoint_url = "http://127.0.0.1:8004/v1"
+served_model_name = "paul-voice-v8"
+quantization = "bf16"
+
+# LoRA adapter
+lora_adapter_path = "/home/admin/finetuning/output/paul-v8-essay-dpo-iter1-beta-0.1-lora"
+lora_version = "v8-essay-dpo-iter1-beta-0.1"
+lora_adapter_hash_partial = "1.27GB safetensors"
+
+# Iteration lineage
+parent_specialist = "paul-voice-v7d"
+training_method = "DPO"
+dpo_beta = 0.1
+dpo_iteration = 1
+
+[estimated_tps_at]
+gb10 = 12.0  # HF transformers bf16 measured baseline
