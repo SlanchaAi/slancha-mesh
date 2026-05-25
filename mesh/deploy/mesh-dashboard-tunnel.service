@@ -1,6 +1,6 @@
 [Unit]
 Description=Slancha-Mesh Cloudflare tunnel for evals.example.com
-Documentation=https://github.com/SlanchaAi/slancha-mesh/blob/main/docs/SLANCHA_MESH_V0_SPEC.md
+Documentation=https://github.com/SlanchaAi/slancha-mesh/blob/main/docs/SLANCHA_PROTOCOL_v0.1_DRAFT.md
 After=network-online.target mesh-dashboard.service
 Wants=network-online.target
 Requires=mesh-dashboard.service

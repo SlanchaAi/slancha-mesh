@@ -1,7 +1,13 @@
 # Slancha-Mesh
 
 Mesh of specialist small models on user hardware, fronted by Slancha's
-classifier-driven router. Full spec: `docs/SLANCHA_MESH_V0_SPEC.md`.
+classifier-driven router. Current spec: `docs/SLANCHA_PROTOCOL_v0.1_DRAFT.md`
+(v0 spec archived at `docs/SLANCHA_MESH_V0_SPEC.archived.md`).
+
+> **Transport:** nodes are reached privately over a Tailscale/Headscale
+> tailnet (a cloud gateway dials home `tag:specialist` nodes by MagicDNS on
+> the model ports), not per-host public tunnels. See `ONBOARDING.md` and
+> `docs/MESH_TAILNET_SURVEY_2026_05_25.md`.
 
 > **Status**: v0.0.2 on `main`. 56 unit tests + live-vLLM integration suite.
 > Extracted 2026-05-16 from `slancha-test` monorepo into its own repo.

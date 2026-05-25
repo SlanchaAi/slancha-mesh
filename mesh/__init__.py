@@ -1,6 +1,7 @@
 """Slancha-Mesh v0 — personal mesh of specialist small models.
 
-See `docs/SLANCHA_MESH_V0_SPEC.md` for the full design. This package
+See `docs/SLANCHA_PROTOCOL_v0.1_DRAFT.md` for the current design (the v0
+spec is archived at `docs/SLANCHA_MESH_V0_SPEC.archived.md`). This package
 implements the v0.0.1 minimal viable mesh:
 
 - `probe`     — hardware probe → NodeProbe JSON
