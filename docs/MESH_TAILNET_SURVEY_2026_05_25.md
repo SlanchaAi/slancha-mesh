@@ -108,3 +108,29 @@ of these read or assume a URL scheme — they just pass `node_url` through.
 The only divergence is **onboarding**: Headscale adds `--login-server=<url>`
 to `tailscale up`. Node-side Python is identical. No SaaS-only feature
 (Funnel/Serve/app-connectors) is used.
+
+## Decisions + what shipped (2026-05-25)
+
+Resolved against this survey:
+
+1. **Per-specialist node_url — fixed.** `LoadedModel` gained an optional
+   `node_url`; the registry binds each specialist to its own port.
+2. **Canonical doc — v0.1 draft.** Tailnet transport update went into
+   `SLANCHA_PROTOCOL_v0.1_DRAFT.md`; broken `SLANCHA_MESH_V0_SPEC.md` links
+   repointed there; ONBOARDING Case B rewritten.
+3. **Onboarding API.** `POST /api/v1/mesh/hosts` (slancha-api) is SaaS-side
+   **key minting** (admin-gated; returns the `tailscale up` join command +
+   `model_ports`). The node does **not** call it — it stays heartbeat-push
+   and just advertises its tailnet `node_url`. ONBOARDING references it.
+4. **Config — generic + env-gated.** `mesh/tailnet.py:TailnetConfig`
+   (`SLANCHA_TAILNET_*` env / `--tailnet` CLI), default off.
+
+Implemented: `mesh/tailnet.py` (new), `LoadedModel.node_url`,
+`ServeDaemon.advertise_host` + bind/advertise split, registry per-binding
+URL. 22 new tests; full hermetic suite 491 passed / 2 skipped.
+
+Cross-repo facts (slancha-api): ACL `tag:gateway -> tag:specialist:8003,8004`
+(`infra/tailscale/acl.hujson`); gateway currently uses static env base URLs
+(`SLANCHA_VLLM_BASE_URL=http://<magicdns>:8003`) — this change lets it move
+to registry-driven discovery. Out of repo: `serve_v8_hf.py` name bug lives
+in slancha-local, not here.
