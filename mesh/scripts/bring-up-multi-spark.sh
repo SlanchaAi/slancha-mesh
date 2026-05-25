@@ -34,6 +34,11 @@ PRIMARY_MODEL="${1:-Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8}"
 PRIMARY_PORT="${2:-8001}"
 SECONDARY_MODEL="${3:-Qwen/Qwen3-8B}"
 SECONDARY_PORT="${4:-8002}"
+# BIND_HOST: where each vLLM listens. 0.0.0.0 to expose on the tailnet for
+# a cloud gateway; default loopback for solo dev. ADVERTISE_HOST: MagicDNS
+# name the registry hands the gateway (auto-discovered if on a tailnet).
+HOST="${BIND_HOST:-127.0.0.1}"
+ADVERTISE_HOST="${ADVERTISE_HOST:-$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("Self",{}).get("DNSName") or "").rstrip("."))' 2>/dev/null || true)}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="${REPO_ROOT}/mesh/.runtime"
@@ -57,7 +62,7 @@ launch_vllm() {
   VLLM_TEST_FORCE_FP8_MARLIN=1 \
   TORCH_CUDA_ARCH_LIST=12.0 \
     nohup vllm serve "${model}" \
-      --host 127.0.0.1 --port "${port}" \
+      --host "${HOST}" --port "${port}" \
       --max-model-len 8192 \
       --gpu-memory-utilization 0.4 \
       --dtype auto \
@@ -154,8 +159,10 @@ chat_smoke "${SECONDARY_PORT}" "${SECONDARY_MODEL}" \
 
 step "READY"
 echo "  mesh-registry node binding:"
-echo "    primary   → http://127.0.0.1:${PRIMARY_PORT}"
-echo "    secondary → http://127.0.0.1:${SECONDARY_PORT}"
+ADV="${ADVERTISE_HOST:-${HOST}}"
+echo "    primary   → http://${ADV}:${PRIMARY_PORT}"
+echo "    secondary → http://${ADV}:${SECONDARY_PORT}"
+[ -n "${ADVERTISE_HOST}" ] && echo "    (advertised over tailnet via MagicDNS — gateway dials these per specialist)"
 echo
 echo "  Logs in ${RUNTIME_DIR}/vllm-${PRIMARY_PORT}.log + vllm-${SECONDARY_PORT}.log"
 echo
