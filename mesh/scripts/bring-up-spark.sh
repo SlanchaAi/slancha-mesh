@@ -24,7 +24,13 @@ set -euo pipefail
 
 SPECIALIST="${1:-qwen3-coder-30b-a3b-fp8}"
 PORT="${2:-8001}"
-HOST="127.0.0.1"
+# BIND_HOST is where vLLM listens. Default loopback for solo dev; set to
+# 0.0.0.0 so a cloud gateway can reach this node over the tailnet.
+#   BIND_HOST=0.0.0.0 bash bring-up-spark.sh ...
+HOST="${BIND_HOST:-127.0.0.1}"
+# ADVERTISE_HOST is what the registry hands the gateway. Auto-discovered
+# from MagicDNS when on a tailnet; override to force a name.
+ADVERTISE_HOST="${ADVERTISE_HOST:-$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("Self",{}).get("DNSName") or "").rstrip("."))' 2>/dev/null || true)}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="${REPO_ROOT}/mesh/.runtime"
@@ -148,9 +154,21 @@ print(f"  ✓ response in {elapsed:.2f}s, {out_tokens} completion tokens, {tps:.
 print(f"  ---")
 print(f"  {content[:200]}")
 print(f"  ---")
-print(f"  node_url to advertise: http://{host}:{port}")
 PYEOF
 
 echo
+if [ -n "${ADVERTISE_HOST}" ]; then
+  echo "  node_url to advertise (tailnet): http://${ADVERTISE_HOST}:${PORT}"
+else
+  echo "  node_url to advertise (local):   http://${HOST}:${PORT}"
+  echo "  (no MagicDNS name found — on a tailnet, join as tag:specialist and"
+  echo "   re-run, or pass ADVERTISE_HOST=<magicdns-name>)"
+fi
+
+echo
 echo "DONE. The mesh can now register this node:"
-echo "  uv run python -m mesh.serve --specialist ${SPECIALIST} --base-port ${PORT}"
+if [ -n "${ADVERTISE_HOST}" ]; then
+  echo "  uv run python -m mesh.serve --tailnet --specialist ${SPECIALIST} --base-port ${PORT}"
+else
+  echo "  uv run python -m mesh.serve --specialist ${SPECIALIST} --base-port ${PORT}"
+fi

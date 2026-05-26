@@ -243,6 +243,9 @@ class MeshRegistry:
             if age > NODE_UNREACHABLE_AFTER:
                 health = "unreachable"
 
+            # Node-level fallback URL (last-reported); per-specialist URLs
+            # on each LoadedModel take precedence so a node serving several
+            # specialists on distinct ports binds each to the right one.
             node_url = ev.node_url or self._node_urls.get(node_id)
             nodes[node_id] = NodeSummary(
                 node_id=node_id,
@@ -261,7 +264,7 @@ class MeshRegistry:
                     health=health,
                     queue_depth=hb.util.queue_depth,
                     p95_latency_ms_60s=hb.util.p95_latency_ms_60s,
-                    node_url=node_url,
+                    node_url=lm.node_url or node_url,
                     last_seen=hb.ts,
                 )
                 specialists.setdefault(lm.specialist_id, []).append(binding)

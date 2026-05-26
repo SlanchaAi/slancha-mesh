@@ -74,48 +74,93 @@ Total time: ~5 minutes once the model is loaded.
 Imagine you're not Paul. You have a beefy local machine, you want to
 join the mesh, and contribute a specialist. The substrate steps:
 
-### One-time mesh-node setup
+> **Transport (2026-05-25):** nodes are reached **privately over a
+> Tailscale/Headscale tailnet**, not per-host Cloudflare tunnels. A cloud
+> gateway (`tag:gateway`) is the single CloudFront origin and dials home
+> nodes by **MagicDNS** on the model ports. The tailnet ACL
+> (`tag:gateway -> tag:specialist:<ports>`, deny-by-default) is the access
+> control. No `cloudflared` / per-host public tunnel anymore. This works
+> identically on Tailscale SaaS and self-hosted **Headscale** — node-side
+> steps are the same; only the auth-key source + `--login-server` differ.
+
+### Recommended: one command (`slancha-mesh up`)
+
+Since 2026-05-25 the steps below are wrapped by a single CLI. Install the
+package and run:
+
+```bash
+pip install -e .                         # from source (not yet on PyPI) → `slancha-mesh` command
+slancha-mesh up --auto --key tskey-...   # first join (tags, serves, exposes discovery)
+slancha-mesh up --auto                   # thereafter (already on the tailnet)
+```
+
+`up` is idempotent: it joins the tailnet tagged `tag:specialist` (only when
+needed), fits the best specialist to the box's hardware (`--auto`, or use
+`--specialist <id>`), serves it bound to the tailnet, and exposes the
+pull-able self-description on `:8088`. Discovery is **pull-based** — the
+gateway finds the node by walking the tailnet (`slancha-mesh discover`), so
+there's no registry URL, node token, or per-node gateway config. Verify with
+`slancha-mesh status` (tailnet identity + specialist-readiness). Full
+design: `docs/MESH_ONELINE_SETUP_PROPOSAL_2026_05_25.md`.
+
+The manual steps below are what `up` automates — keep them for debugging or a
+bespoke setup.
+
+### One-time mesh-node setup (the long way — what `up` does for you)
 
 1. **Install slancha-local + slancha-mesh** on your box. Pull both
-   repos, install requirements, run the heartbeat loop.
+   repos, install requirements.
 
-2. **Boot the mesh registry** locally:
+2. **Join the tailnet as a specialist.** Get a `tag:specialist`
+   ephemeral auth key, then run the join command:
+   ```bash
+   # Tailscale SaaS:
+   sudo tailscale up --auth-key=<KEY> --advertise-tags=tag:specialist
+   # Self-hosted Headscale — add your control server:
+   sudo tailscale up --auth-key=<KEY> --advertise-tags=tag:specialist \
+     --login-server=https://<your-headscale-host>
+   ```
+   Where the key comes from:
+   - **Tailscale:** admin console → *Settings → Keys → Generate auth key*
+     (tagged `tag:specialist`, ephemeral).
+   - **Headscale:** `headscale preauthkeys create --user <user> --ephemeral`
+     (with `tag:specialist` in the node's ACL tag owners).
+   - **Via the dashboard:** an onboarding admin calls
+     `POST /api/v1/mesh/hosts` on slancha-api, which mints a tagged key and
+     returns the exact `join_command` + `model_ports` — no shell needed.
+
+3. **Confirm your MagicDNS name** (this is what the gateway dials):
+   ```bash
+   tailscale status --json | jq -r .Self.DNSName   # e.g. gb10-1.<tailnet>.ts.net.
+   ```
+   `mesh.serve --tailnet` auto-discovers this; override with
+   `--advertise-host <name>` or `SLANCHA_TAILNET_ADVERTISE_HOST`.
+
+4. **Boot the mesh registry**, bound so the tailnet can reach it:
    ```bash
    SLANCHA_NODE_TOKEN=$(openssl rand -hex 32) \
-   uvicorn mesh.service:create_mesh_app --factory --port 8088
+   uvicorn mesh.service:create_mesh_app --factory --host 0.0.0.0 --port 8088
    ```
 
-3. **Stand up a Cloudflare Tunnel** pointing at your local
-   slancha-local OpenAI-compat endpoint. Convention:
-   `<handle>-mesh.example.com` (single-level subdomain — CF
-   Universal SSL covers it without an advanced certificate). See
-   `~/.cloudflared/config.yml` template in `infra/cloudfront/README.md`.
-
-4. **Issue a CF Access service token** scoped to the new tunnel.
-   Operator (Paul) does this — adds your tunnel's hostname to the
-   Access policy + emits the `CF-Access-Client-Id` /
-   `CF-Access-Client-Secret` pair via wire.
-
-### One-time SaaS-side setup (paul-mac does this for you)
-
-5. **Add your origin to the L@E allowlist.** Paul edits
-   `infra/cloudfront/origin_request_lambda.py`'s
-   `MESH_ORIGIN_REGISTRY` to include `<handle>-mesh-laulpogan-com →
-   <handle>-mesh.example.com`. Rebuild the L@E zip; reapply
-   Terraform `-target=module.mesh_lambda_edge`.
-
-6. **Seed your KVS record.** Paul runs:
+5. **Serve specialists on the tailnet interface** at the model ports
+   (convention matching the gateway ACL: vLLM `:8003`, HF `:8004`). The
+   serve daemon binds `0.0.0.0` and advertises your MagicDNS host:
    ```bash
-   python infra/cloudfront/kvs_seed.py \
-     --kvs-arn $MESH_ROUTE_KVS_ARN \
-     --bearer slancha_<your-bearer> \
-     --user-id <your-supabase-uuid> \
-     --route-target mesh \
-     --mesh-origin-id <handle>-mesh-laulpogan-com \
-     --pref-max '{"max_cost_cents": 100, "max_latency_ms_p95": 5000}'
+   python -m mesh.serve --tailnet \
+     --specialist paul-voice --base-port 8003
    ```
-   This populates the KVS with your bearer-hash → routing record so
-   CloudFront knows to send your traffic to your tunnel.
+   Each loaded specialist now heartbeats a `node_url` of
+   `http://<your-magicdns>:<port>` — reachable by the gateway over WireGuard.
+
+### SaaS-side setup (gateway operator does this)
+
+6. **Grant the gateway reach** in the tailnet ACL (deny-by-default
+   otherwise): `{"src": ["tag:gateway"], "dst": ["tag:specialist"],
+   "ip": ["tcp:8003", "tcp:8004", "tcp:8088"]}`. The model ports (8003/8004)
+   carry inference; `:8088` is the node-info port the gateway **pulls** for
+   discovery (`slancha-mesh discover` → each node's `/models?include=routing_meta`).
+   SSH (`:22`) stays denied to the gateway. This is a one-time ACL entry, not
+   per node — no per-user CloudFront tunnel or L@E origin entry is created.
 
 ### Per-specialist (you again, repeated for each model)
 
@@ -123,18 +168,29 @@ join the mesh, and contribute a specialist. The substrate steps:
 
 ### Validation
 
-8. **Smoke test from a SaaS-shape client:**
+8. **Reachability from the gateway** (run on the gateway, or any
+   `tag:gateway`/admin device):
+   ```bash
+   curl -s http://<your-magicdns>:8003/v1/models | jq .   # backend up over tailnet
+   ```
+   Then end-to-end from a SaaS-shape client:
    ```bash
    curl https://api.slancha.ai/v1/chat/completions \
      -H "Authorization: Bearer slancha_<your-bearer>" \
      -H "Content-Type: application/json" \
      -d '{"model": "your-id", "messages": [{"role":"user","content":"hi"}]}'
    ```
-   Expect SSE chunks streaming back via your tunnel. The response
-   carries `X-Slancha-Route-Target: mesh` if you watched headers.
+   Expect SSE chunks streaming back via the gateway.
 
 ## Anti-patterns this onboarding prevents
 
+- **DON'T bind the model server to `127.0.0.1`** when joining the mesh.
+  The gateway is off-box now (cloud), reaching you over the tailnet —
+  loopback is unreachable. Bind `0.0.0.0` (or the tailnet IP) and let the
+  daemon advertise your MagicDNS name.
+- **DON'T expose the model port publicly.** The tailnet ACL is the access
+  control; there is no public tunnel. Don't add Funnel/port-forward —
+  `tag:gateway -> tag:specialist:<ports>` is the only path in.
 - **DON'T copy/paste an existing TOML** without auditing `domain` and
   `capabilities`. The router gates on these — wrong tags break routing.
 - **DON'T set `quality_router_observed` directly.** That field is
@@ -145,11 +201,16 @@ join the mesh, and contribute a specialist. The substrate steps:
 
 ## Where to look when things break
 
+- Node not on the tailnet: `tailscale status` shows `tag:specialist` and
+  `Online`? On Headscale, did you pass `--login-server`?
 - Heartbeat not registering: `GET /registry` shows your node? If no,
   check `SLANCHA_NODE_TOKEN` env on both ends.
+- Registered but gateway can't reach it: from a `tag:gateway` host,
+  `curl http://<magicdns>:<port>/v1/models`. Connection refused →
+  backend bound to loopback (bind `0.0.0.0`). Timeout → ACL grant missing
+  for that port.
+- `node_url` is loopback in `/registry`: the daemon has no advertise host
+  — run with `--tailnet` (or set `SLANCHA_TAILNET_ENABLED=1`), confirm
+  `tailscale status --json` returns `Self.DNSName`.
 - Specialist registered but no traffic: `GET /models?include=routing_meta`
   — capabilities listed? router_observed populated?
-- Tunnel reachable but 401: CF Access service-token in the L@E
-  customHeaders matches the tunnel's expected pair.
-- Forward-sig mismatch: HMAC key rotation — both L@E and slancha-local
-  must hold the same key (KID-aware grace window).
