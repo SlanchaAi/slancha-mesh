@@ -20,6 +20,9 @@ dependencies = [
   "psutil>=5.9",
 ]
 
+[project.scripts]
+slancha-mesh = "mesh.cli:main"
+
 [project.optional-dependencies]
 serve = [
   "vllm>=0.17",

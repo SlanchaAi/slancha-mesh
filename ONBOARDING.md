@@ -83,7 +83,30 @@ join the mesh, and contribute a specialist. The substrate steps:
 > identically on Tailscale SaaS and self-hosted **Headscale** — node-side
 > steps are the same; only the auth-key source + `--login-server` differ.
 
-### One-time mesh-node setup
+### Recommended: one command (`slancha-mesh up`)
+
+Since 2026-05-25 the steps below are wrapped by a single CLI. Install the
+package and run:
+
+```bash
+pip install -e .                         # from source (not yet on PyPI) → `slancha-mesh` command
+slancha-mesh up --auto --key tskey-...   # first join (tags, serves, exposes discovery)
+slancha-mesh up --auto                   # thereafter (already on the tailnet)
+```
+
+`up` is idempotent: it joins the tailnet tagged `tag:specialist` (only when
+needed), fits the best specialist to the box's hardware (`--auto`, or use
+`--specialist <id>`), serves it bound to the tailnet, and exposes the
+pull-able self-description on `:8088`. Discovery is **pull-based** — the
+gateway finds the node by walking the tailnet (`slancha-mesh discover`), so
+there's no registry URL, node token, or per-node gateway config. Verify with
+`slancha-mesh status` (tailnet identity + specialist-readiness). Full
+design: `docs/MESH_ONELINE_SETUP_PROPOSAL_2026_05_25.md`.
+
+The manual steps below are what `up` automates — keep them for debugging or a
+bespoke setup.
+
+### One-time mesh-node setup (the long way — what `up` does for you)
 
 1. **Install slancha-local + slancha-mesh** on your box. Pull both
    repos, install requirements.
@@ -133,10 +156,11 @@ join the mesh, and contribute a specialist. The substrate steps:
 
 6. **Grant the gateway reach** in the tailnet ACL (deny-by-default
    otherwise): `{"src": ["tag:gateway"], "dst": ["tag:specialist"],
-   "ip": ["tcp:8003", "tcp:8004"]}`. SSH (`:22`) stays denied to the
-   gateway. The gateway discovers your node via the registry snapshot
-   (`GET /registry` → per-specialist `node_url`); no per-user CloudFront
-   tunnel or L@E origin entry is created.
+   "ip": ["tcp:8003", "tcp:8004", "tcp:8088"]}`. The model ports (8003/8004)
+   carry inference; `:8088` is the node-info port the gateway **pulls** for
+   discovery (`slancha-mesh discover` → each node's `/models?include=routing_meta`).
+   SSH (`:22`) stays denied to the gateway. This is a one-time ACL entry, not
+   per node — no per-user CloudFront tunnel or L@E origin entry is created.
 
 ### Per-specialist (you again, repeated for each model)
 

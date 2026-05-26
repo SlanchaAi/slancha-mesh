@@ -173,6 +173,15 @@ def advertise_url(base_url: str, advertise_host: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _up_command(config: TailnetConfig, auth_key: str) -> list[str]:
+    """Argv for `tailscale up` to join tagged. Headscale adds login-server."""
+    parts = ["sudo", config.tailscale_bin, "up", f"--auth-key={auth_key}"]
+    parts.append(f"--advertise-tags={','.join(config.tags)}")
+    if config.control_plane == "headscale" and config.login_server:
+        parts.append(f"--login-server={config.login_server}")
+    return parts
+
+
 def onboarding_command(config: TailnetConfig, auth_key: str = "<AUTH_KEY>") -> str:
     """The `tailscale up` command a new specialist node runs to join.
 
@@ -181,6 +190,8 @@ def onboarding_command(config: TailnetConfig, auth_key: str = "<AUTH_KEY>") -> s
     admin console, Headscale `headscale preauthkeys create`, or the
     slancha-api `POST /api/v1/mesh/hosts` endpoint).
     """
+    # `tailscale` literal (not config.tailscale_bin) keeps the doc command
+    # copy-pasteable on a box where the binary is just `tailscale`.
     parts = ["sudo", "tailscale", "up", f"--auth-key={auth_key}"]
     parts.append(f"--advertise-tags={','.join(config.tags)}")
     if config.control_plane == "headscale" and config.login_server:
@@ -188,14 +199,115 @@ def onboarding_command(config: TailnetConfig, auth_key: str = "<AUTH_KEY>") -> s
     return " ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Live status + idempotent join
+# ---------------------------------------------------------------------------
+
+
+def tailnet_status(config: TailnetConfig) -> dict | None:
+    """Parsed `tailscale status --json`, or None (never-raise contract)."""
+    try:
+        out = subprocess.run(
+            [config.tailscale_bin, "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=4.0,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError, FileNotFoundError):
+        return None
+    if out.returncode != 0 or not out.stdout:
+        return None
+    try:
+        data = json.loads(out.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _self_block(config: TailnetConfig, status_fn: Callable[[TailnetConfig], dict | None]) -> dict | None:
+    """The `Self` block from a status payload (full status or already-Self)."""
+    status = status_fn(config)
+    if not isinstance(status, dict):
+        return None
+    self_obj = status.get("Self")
+    return self_obj if isinstance(self_obj, dict) else None
+
+
+def _has_all_tags(self_obj: dict, tags: list[str]) -> bool:
+    have = set(self_obj.get("Tags") or [])
+    return all(t in have for t in tags)
+
+
+@dataclass(frozen=True)
+class JoinStatus:
+    """Outcome of `ensure_joined` — no silent half-states."""
+
+    joined: bool  # node is on the tailnet with the required tags after this call
+    already: bool  # was already joined (no `tailscale up` was run)
+    host: str | None  # MagicDNS name, trailing dot stripped
+    message: str
+
+
+def ensure_joined(
+    config: TailnetConfig,
+    auth_key: str | None = None,
+    *,
+    _status_fn: Callable[[TailnetConfig], dict | None] = tailnet_status,
+    _runner: Callable[..., object] = subprocess.run,
+) -> JoinStatus:
+    """Idempotently ensure this node is on the tailnet tagged for specialists.
+
+    - Already online with all `config.tags` → no-op (`already=True`).
+    - Not joined (or missing a tag) + `auth_key` → run `tailscale up`,
+      re-resolve the MagicDNS host.
+    - Not joined + no key → fail loudly, returning the exact join command in
+      `message` (the human runs it / mints a key) — never a silent pass.
+
+    `_status_fn` / `_runner` are injected for testing. Disabled config is a
+    no-op (dev mode keeps loopback).
+    """
+    if not config.enabled:
+        return JoinStatus(joined=False, already=False, host=None, message="tailnet disabled")
+
+    self_obj = _self_block(config, _status_fn)
+    if self_obj and self_obj.get("Online") and _has_all_tags(self_obj, config.tags):
+        host = (self_obj.get("DNSName") or "").rstrip(".") or None
+        return JoinStatus(
+            joined=True, already=True, host=host,
+            message=f"already on tailnet as {','.join(config.tags)}",
+        )
+
+    if not auth_key:
+        return JoinStatus(
+            joined=False, already=False, host=None,
+            message=(
+                "not on the tailnet (or missing tag). Mint a tagged auth key, then run: "
+                + onboarding_command(config)
+            ),
+        )
+
+    proc = _runner(_up_command(config, auth_key), capture_output=True, text=True, check=False)
+    if getattr(proc, "returncode", 1) != 0:
+        err = (getattr(proc, "stderr", "") or "").strip()[:200]
+        return JoinStatus(joined=False, already=False, host=None, message=f"tailscale up failed: {err}")
+
+    after = _self_block(config, _status_fn)
+    host = (after.get("DNSName") or "").rstrip(".") or None if after else None
+    return JoinStatus(joined=True, already=False, host=host, message="joined tailnet")
+
+
 __all__ = [
     "ControlPlane",
     "DEFAULT_MODEL_PORTS",
     "DEFAULT_SPECIALIST_TAG",
+    "JoinStatus",
     "TailnetConfig",
     "advertise_url",
+    "ensure_joined",
     "onboarding_command",
     "parse_magicdns_name",
     "resolve_advertise_host",
     "resolve_magicdns_name",
+    "tailnet_status",
 ]

@@ -25,11 +25,31 @@ uv pip install -e ".[dev]"           # core + tests
 uv pip install -e ".[dev,serve]"     # adds vLLM for live serving
 ```
 
+## Quickstart — join the mesh (one command)
+
+```bash
+pip install -e .                            # from source (not yet on PyPI); installs the `slancha-mesh` command
+slancha-mesh up --auto --key tskey-...      # join tailnet (tagged), fit+serve a specialist, expose discovery
+slancha-mesh up --auto                       # thereafter (already on the tailnet)
+slancha-mesh status                          # this box's tailnet identity + specialist-readiness
+slancha-mesh discover                        # any consumer: walk the tailnet → routing table
+```
+
+Discovery is **pull-based**: a consumer walks `tailscale status` for
+`tag:specialist` peers and pulls each node's `/models` over the tailnet — no
+heartbeat-push, no central registry, no shared token. Tailnet membership +
+the ACL is the credential. Design + the push-vs-pull decision:
+`docs/MESH_ONELINE_SETUP_PROPOSAL_2026_05_25.md`. Contributor walkthrough:
+`JAMES_NODE_SETUP.md`.
+
 ## What ships (current state)
 
 | Module | Status | Notes |
 |---|---|---|
 | `mesh/probe.py` | v0.0.1 | NodeProbe with GB10 unified-mem detection |
+| **`mesh/cli.py`** | **v0.0.7** | `slancha-mesh` CLI: `up` / `discover` / `status` / `serve` |
+| **`mesh/discovery.py`** | **v0.0.7** | Pull discovery: walk tailnet → routes, host-pinned `node_url` |
+| **`mesh/node_server.py`** | **v0.0.7** | `build_node()` — daemon + self-description app share one registry |
 | `mesh/catalog/*.toml` | v0.0.2 | 6 specialist cards (5 tier-1+2 + 1 backed by real cached weights) |
 | `mesh/allocator.py` | v0.0.1 | `model_fit_score` + 3 cluster strategies |
 | `mesh/registry.py` | v0.0.1 | Event-sourced; in-memory; deterministic replay |
