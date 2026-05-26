@@ -21,6 +21,7 @@ in `probe.available_backends` (else the agent/operator installs it).
 
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass, field
 
 from mesh.models import NodeProbe
@@ -74,8 +75,17 @@ def _is_spark_class(probe: NodeProbe) -> bool:
     return probe.arch == "aarch64" and probe.unified_memory
 
 
-def recommend_engine(probe: NodeProbe) -> EngineRec:
-    """Recommend a serving engine + quantization for this node's hardware."""
+def recommend_engine(probe: NodeProbe, *, os_name: str | None = None) -> EngineRec:
+    """Recommend a serving engine + quantization for this node's hardware.
+
+    `os_name` is the host OS (`platform.system()` — "Windows" | "Linux" |
+    "Darwin"); defaults to the live host. It matters because the probe's arch
+    can't distinguish Windows from Linux on x86_64: vLLM is Linux/WSL-only,
+    so a Windows + NVIDIA box must be steered to Ollama (which runs natively
+    on Windows with CUDA acceleration), not vLLM.
+    """
+    os_name = os_name or platform.system()
+
     def rec(backend: str, quant: str, rationale: str, alternates: tuple[str, ...]) -> EngineRec:
         return EngineRec(
             backend=backend,
@@ -107,6 +117,16 @@ def recommend_engine(probe: NodeProbe) -> EngineRec:
     # Discrete NVIDIA (x86_64 + CUDA).
     if probe.cuda_capability is not None and probe.arch == "x86_64":
         gb = _effective_gb(probe)
+        # vLLM is Linux/WSL-only. On Windows, Ollama runs natively with CUDA
+        # acceleration — that's the right NVIDIA path there, not vLLM.
+        if os_name == "Windows":
+            return rec(
+                "ollama", "gguf-q4",
+                f"Windows + NVIDIA (cc {probe.cuda_capability}, ~{gb:.0f} GB): Ollama "
+                "runs natively with CUDA acceleration; vLLM is Linux/WSL-only. Run "
+                "vLLM under WSL2 if you need its throughput.",
+                ("llamacpp",),
+            )
         if gb >= _VLLM_VRAM_FLOOR_GB:
             quant = "fp8" if probe.cuda_capability in _FP8_CAPABLE else "awq"
             return rec(

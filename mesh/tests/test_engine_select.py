@@ -42,15 +42,31 @@ def test_gb10_spark_picks_ollama_not_vllm():
 def test_discrete_nvidia_24gb_picks_vllm():
     rec = recommend_engine(_probe(
         arch="x86_64", chip="rtx-4090", cuda_capability="8.9", vram_available_gb=24.0,
-    ))
+    ), os_name="Linux")
     assert rec.backend == "vllm"
     assert rec.quant in ("fp8", "awq")
+
+
+def test_windows_nvidia_picks_ollama_not_vllm():
+    # vLLM is Linux/WSL-only; Windows + NVIDIA → Ollama (native CUDA).
+    rec = recommend_engine(_probe(
+        arch="x86_64", chip="rtx-4090", cuda_capability="8.9", vram_available_gb=24.0,
+    ), os_name="Windows")
+    assert rec.backend == "ollama"
+    assert "gguf" in rec.quant
+    assert "vllm" in rec.rationale.lower()
+
+
+def test_windows_cpu_picks_gguf():
+    rec = recommend_engine(_probe(arch="x86_64", chip="intel", cuda_capability=None), os_name="Windows")
+    assert rec.backend in ("ollama", "llamacpp")
+    assert "gguf" in rec.quant
 
 
 def test_discrete_nvidia_small_vram_picks_gguf():
     rec = recommend_engine(_probe(
         arch="x86_64", chip="rtx-4060", cuda_capability="8.9", vram_available_gb=8.0,
-    ))
+    ), os_name="Linux")
     assert rec.backend in ("ollama", "llamacpp")
     assert "gguf" in rec.quant
 
