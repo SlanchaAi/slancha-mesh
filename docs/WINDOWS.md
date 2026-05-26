@@ -132,4 +132,37 @@ doc note._
     messages queued but never delivered ("duplicate" on re-push = already in
     the relay slot, just un-pulled). Fix: `wire up` / `wire daemon` on both
     ends. (Not a slancha issue, but worth noting for agent-driven setups.)
-- _(pending: real `plan --json` / `doctor --json` output once 3.12 is installed)_
+  - **`plan` worked first try**: `recommended_engine.backend="ollama"`, cc 6.1
+    read from nvidia-smi.exe, vLLM correctly ruled out (the OS-aware fix).
+  - **doctor crashed twice, two distinct Windows bugs, both fixed:** (a) uncaught
+    `httpx.ConnectTimeout` (Windows raises it on a closed port where Linux raises
+    ConnectError) → catch `httpx.HTTPError`; (b) once fixed, it unmasked a
+    `UnicodeEncodeError` — Rich box-drawing glyphs on the cp1252 console → force
+    UTF-8 stdio at CLI import. Both verified on-box (slancha-local).
+  - **End-to-end serve ✅**: `qwen2.5:3b` returned real text via
+    curl → slancha-local :8000 (rules-fallback classifier) → Ollama :11434 →
+    GTX 1070 CUDA.
+  - **Mesh registration ✅ (push)**: with `SLANCHA_MESH_REGISTRY_URL` set,
+    slancha-local's heartbeat registered the node in a registry over the tailnet
+    — visible with `node_url=…:8000` + `loaded=[qwen2.5:3b]`.
+  - **Tag gap**: the box joined the tailnet as a personal device (untagged).
+    Tagged `tag:specialist` via the Tailscale admin API
+    (`POST /api/v2/device/{id}/tags`) — pull-discovery + the `tag:gateway →
+    tag:specialist` ACL require it. (Or join with a tagged auth key.)
+
+## Known limitations / follow-ups (surfaced by the live run)
+
+- **Windows Firewall blocks inbound** by default — `serve --host 0.0.0.0` binds
+  the tailnet interface, but nothing reaches `:8000` from another host until an
+  (elevated) rule is added:
+  `New-NetFirewallRule -DisplayName "slancha 8000" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow`.
+  Outbound (the heartbeat) is unaffected, so push-registration works regardless.
+- **Push vs pull discovery aren't unified for slancha-local nodes.**
+  slancha-local registers via the **push** heartbeat (`SLANCHA_MESH_REGISTRY_URL`),
+  but `slancha-mesh discover` (pull) fetches node-info on **:8088** — which
+  slancha-local doesn't serve. A pure-pull consumer (the gateway) won't see a
+  slancha-local node's models; the push registry does. Unifying these
+  (slancha-local exposing the `/models` node-info surface, or the gateway reading
+  the push registry) is the open architecture item.
+- **vLLM-on-Windows** is not supported native (Linux/WSL). slancha-mesh's serving
+  daemon is vLLM-only, so Windows nodes serve through slancha-local + Ollama.
