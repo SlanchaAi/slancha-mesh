@@ -393,6 +393,104 @@ def run_doctor(
 
 
 # ---------------------------------------------------------------------------
+# Pull / tailnet model checks (v0.0.7) — the `slancha-mesh doctor` surface.
+# The checks above target the push/central-registry model; these target a
+# node that joins a tailnet and is pull-discovered.
+# ---------------------------------------------------------------------------
+
+NODE_INFO_PORT = 8088
+
+
+def check_tailnet_specialist_ready() -> CheckResult:
+    """On the tailnet AND advertising tag:specialist? (else gateway can't reach)."""
+    from mesh.tailnet import DEFAULT_SPECIALIST_TAG, TailnetConfig, tailnet_status
+
+    status = tailnet_status(TailnetConfig(enabled=True))
+    if status is None:
+        return CheckResult(
+            id="tailnet.specialist_ready", status="skip",
+            detail="not on a tailnet (no `tailscale status`) — loopback/dev mode",
+        )
+    self_obj = status.get("Self") or {}
+    online = bool(self_obj.get("Online"))
+    tags = self_obj.get("Tags") or []
+    host = (self_obj.get("DNSName") or "").rstrip(".")
+    if online and DEFAULT_SPECIALIST_TAG in tags:
+        return CheckResult(
+            id="tailnet.specialist_ready", status="pass",
+            detail=f"online as {DEFAULT_SPECIALIST_TAG} ({host})",
+        )
+    if not online:
+        return CheckResult(
+            id="tailnet.specialist_ready", status="fail",
+            detail="node offline on the tailnet",
+            fix="check tailscaled; re-run `slancha-mesh up --key <tagged-key>`",
+        )
+    return CheckResult(
+        id="tailnet.specialist_ready", status="fail",
+        detail=f"missing {DEFAULT_SPECIALIST_TAG} (tags={tags}) — gateway can't discover this node",
+        fix="re-join tagged: `slancha-mesh up --key <tagged-key>`",
+    )
+
+
+def check_recommended_engine_installed() -> CheckResult:
+    """Is the hardware-recommended serving engine installed?"""
+    from mesh.engine_select import recommend_engine
+    from mesh.probe import probe_node
+
+    probe = probe_node()
+    rec = recommend_engine(probe)
+    if rec.installed:
+        return CheckResult(
+            id="engine.installed", status="pass",
+            detail=f"recommended engine {rec.backend} ({rec.quant}) present",
+        )
+    return CheckResult(
+        id="engine.installed", status="warn",
+        detail=f"recommended engine {rec.backend} not in available_backends={list(probe.available_backends)}",
+        fix=f"install {rec.backend} — {rec.rationale}",
+    )
+
+
+def check_router_reachable() -> CheckResult:
+    """Is a router (tag:gateway peer, or local slancha-local) available?"""
+    from mesh.router_bootstrap import detect_router
+    from mesh.tailnet import TailnetConfig, tailnet_status
+
+    status = tailnet_status(TailnetConfig(enabled=True))
+    st = detect_router(status)
+    if st.gateway_peer:
+        return CheckResult(
+            id="router.reachable", status="pass",
+            detail="a tag:gateway router is reachable on the tailnet",
+        )
+    if st.on_path:
+        return CheckResult(
+            id="router.reachable", status="warn",
+            detail="slancha-local installed locally but no gateway peer seen",
+            fix="start it: `slancha-local serve`",
+        )
+    return CheckResult(
+        id="router.reachable", status="warn",
+        detail="no router found (no tag:gateway peer, no local slancha-local)",
+        fix="`slancha-mesh up --with-router` (first-node home mesh), or run a router elsewhere",
+    )
+
+
+def run_node_doctor(node_info_port: int = NODE_INFO_PORT) -> DoctorReport:
+    """Pull/tailnet-model diagnostic for a `slancha-mesh` specialist node."""
+    report = DoctorReport()
+    report.append(check_tailnet_specialist_ready())
+    report.append(check_recommended_engine_installed())
+    report.append(check_router_reachable())
+    report.append(check_nvidia_smi())
+    report.append(check_node_token_env())
+    report.append(check_port_listener(node_info_port))
+    report.finalize()
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 

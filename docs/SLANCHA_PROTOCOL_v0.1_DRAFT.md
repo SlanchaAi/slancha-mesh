@@ -6,6 +6,42 @@
 
 This document supersedes `SLANCHA_MESH_V0_SPEC.md` once mac signs off. The prior spec framed mesh as a router with its own classifier; this draft separates concerns — mesh = placement substrate + signal-rich protocol, cloud classifier = decision maker, edge = transparent dispatcher.
 
+> ## ⚠️ Transport update (2026-05-25): per-host CF tunnels → Tailscale/Headscale tailnet
+>
+> The **node-reachability leg** changed after this draft was written. The
+> diagrams/tasks below describe a **per-user Cloudflare tunnel** per mesh
+> node (`mesh.<user>.laulpogan.com`) fronted by CF Access + L@E origin
+> groups. That per-host tunnel is **superseded** by a tailnet:
+>
+> - A single cloud **gateway** (`tag:gateway`, a small tailnet node) is the
+>   one CloudFront origin. It runs `slancha-local-proxy` and reaches home
+>   model nodes **over the tailnet by MagicDNS** on the model ports
+>   (vLLM `:8003`, HF `:8004`).
+> - Home model-serving nodes are tailnet members tagged **`tag:specialist`**.
+> - Access control is the **deny-by-default tailnet ACL**
+>   (`tag:gateway -> tag:specialist:<model ports>` only; SSH `:22` denied),
+>   **not** a per-host CF Access service token. ACL source of truth:
+>   `slancha-api/infra/tailscale/acl.hujson`.
+> - Onboarding is `tailscale up --auth-key=<ephemeral, tag:specialist>
+>   --advertise-tags=tag:specialist` (Headscale adds
+>   `--login-server=<url>`), then bind the model server to the tailnet
+>   interface (`0.0.0.0`). See `ONBOARDING.md`.
+> - **Control-plane-agnostic:** self-hosted **Headscale** and Tailscale
+>   SaaS both work; node code is identical. No SaaS-only feature
+>   (Funnel/Serve/app-connectors) is used.
+>
+> **What still holds:** CloudFront fronting, the L@E/KVS per-user *routing*
+> decision (which now targets the gateway origin, not a per-user tunnel),
+> the signal-rich card/protocol, and the `node_url` contract — `node_url`
+> is now a MagicDNS URL (`http://<magicdns>:<port>`) carried **per
+> specialist** in the registry snapshot so the gateway dials the right port.
+>
+> **Stale below, read in light of this:** the per-user `mesh.<user>`
+> tunnel hostname, CF Access service-token-as-mesh-auth (#51, #53), and the
+> `MESH_ORIGIN_REGISTRY`/KVS-per-tunnel onboarding. The CF Origin-Group
+> *failover* mechanism (B4) still applies to the **gateway** origin.
+> Survey + node-side impl: `docs/MESH_TAILNET_SURVEY_2026_05_25.md`.
+
 **Revision 3 changelog** (mac PR #1 verification + new concerns):
 - B6 carryover: slug drift fixed — all bare `paul-v8-essay` replaced with canonical `paul-v8-essay-dpo-iter1-beta-0.1`; `voice-paul-v8` residue removed from §11
 - H22 fix: #65d rotation tooling task added (HMAC KID seed/swap + CF Access rotator + mesh-ingest-token rotator + dry-run CLI) — "build tooling first" now backed by actual task

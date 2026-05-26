@@ -176,6 +176,13 @@ class LoadedModel(_Frozen):
     model_id: ModelId
     loaded_at: datetime
     estimated_tps: float | None = None
+    # The OpenAI-compatible base URL of THIS specialist's port. A node can
+    # serve several specialists on distinct ports (e.g. vLLM :8003, HF
+    # :8004) reachable on one MagicDNS host; carrying the URL per loaded
+    # model lets the registry bind each specialist to the right port.
+    # None → the registry falls back to the node-level HeartbeatPostRequest
+    # node_url (back-compat with nodes that don't set this).
+    node_url: str | None = None
 
 
 class NodeUtilization(_Frozen):

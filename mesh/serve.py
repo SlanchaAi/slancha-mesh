@@ -24,7 +24,7 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,6 +41,7 @@ from mesh.models import (
 from mesh.probe import probe_node
 from mesh.registry import HeartbeatPostRequest, MeshRegistry
 from mesh.replay_store import TrafficReplayStore
+from mesh.tailnet import TailnetConfig, advertise_url, resolve_advertise_host
 from mesh.training import TrainingPass
 
 HEARTBEAT_INTERVAL_S = 5.0
@@ -65,7 +66,12 @@ class ServeDaemon:
     backends: list[BaseBackend]
     probe: NodeProbe
     registry: MeshRegistry | None = None
-    node_url_template: str = "http://{host}:{port}"
+    # Tailnet-dialable host (e.g. a MagicDNS name) the registry should
+    # advertise for this node. None → advertise the backend's own
+    # (loopback) base_url unchanged — back-compat for non-tailnet dev.
+    # When set, each backend's bind URL has its host swapped to this so
+    # the cloud gateway can reach the node over WireGuard.
+    advertise_host: str | None = None
     heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S
     log_path: Path | None = None
     # Idle fine-tune detector — observes util signals each heartbeat;
@@ -160,6 +166,9 @@ class ServeDaemon:
                     model_id=be.card.model_id,
                     loaded_at=now,
                     estimated_tps=tps,
+                    # Advertise THIS backend's port under the tailnet host
+                    # (no-op swap when advertise_host is None).
+                    node_url=advertise_url(be.base_url, self.advertise_host),
                 )
             )
             util = be.utilization() or {}
@@ -221,7 +230,13 @@ class ServeDaemon:
         """Push one heartbeat into the registry (or log if no registry)."""
         hb = self.heartbeat()
         first_backend = self.backends[0] if self.backends else None
-        node_url = first_backend.base_url if first_backend else None
+        # Node-level fallback URL (representative); per-specialist URLs ride
+        # on hb.loaded_models. Swapped to the tailnet host when advertising.
+        node_url = (
+            advertise_url(first_backend.base_url, self.advertise_host)
+            if first_backend
+            else None
+        )
         req = HeartbeatPostRequest(heartbeat=hb, node_url=node_url)
         if self.registry is not None:
             self.registry.record_heartbeat(req)
@@ -335,6 +350,7 @@ def build_backend(
     port: int,
     log_dir: Path | None = None,
     cuda_capability: str | None = None,
+    bind_host: str = "127.0.0.1",
 ) -> BaseBackend:
     """Pick a backend implementation from the card's `required_backend`.
 
@@ -342,6 +358,11 @@ def build_backend(
     right FP8 kernel path per-chip. Blackwell consumer (sm_120/sm_121)
     needs the Marlin weight-only FP8 fallback; Hopper/Ada don't. None →
     conservative (no Marlin force, use native path).
+
+    `bind_host` is where the serving process LISTENS. Defaults to loopback
+    (`127.0.0.1`); set to `0.0.0.0` (or the tailnet IP) so the cloud
+    gateway can reach the backend over the tailnet. The advertised URL
+    (a MagicDNS name) is set separately on the daemon, not here.
     """
     log_path = None
     if log_dir is not None:
@@ -351,6 +372,7 @@ def build_backend(
     if card.required_backend == "vllm":
         return VLLMBackend(
             card=card,
+            host=bind_host,
             port=port,
             log_path=log_path,
             cuda_capability=cuda_capability,
@@ -370,12 +392,19 @@ def build_daemon(
     registry: MeshRegistry | None = None,
     base_port: int = 8001,
     log_dir: Path | None = None,
+    tailnet: TailnetConfig | None = None,
 ) -> ServeDaemon:
     """Construct a ServeDaemon from the catalog + an optional filter.
 
     `specialist_ids` defaults to the empty list, which means "don't load
     anything; just heartbeat the hardware." Pass a list to start specific
     specialists.
+
+    `tailnet` (optional) switches the node onto a Tailscale/Headscale
+    tailnet: backends bind to `tailnet.bind_host` (0.0.0.0) and the daemon
+    advertises a MagicDNS host (explicit `advertise_host` or auto-resolved
+    via `tailscale status --json`). When None or `enabled=False`, the
+    daemon binds loopback and advertises loopback — unchanged dev behavior.
     """
     if catalog is None:
         catalog = load_catalog()
@@ -390,6 +419,12 @@ def build_daemon(
     if probe is None:
         probe = probe_node()
 
+    bind_host = "127.0.0.1"
+    advertise_host: str | None = None
+    if tailnet is not None and tailnet.enabled:
+        bind_host = tailnet.bind_host
+        advertise_host = resolve_advertise_host(tailnet)
+
     backends: list[BaseBackend] = []
     port = base_port
     for card in selected:
@@ -399,11 +434,18 @@ def build_daemon(
                 port=port,
                 log_dir=log_dir,
                 cuda_capability=probe.cuda_capability,
+                bind_host=bind_host,
             )
         )
         port += 1
 
-    return ServeDaemon(backends=backends, probe=probe, registry=registry, log_path=log_dir / "serve.log" if log_dir else None)
+    return ServeDaemon(
+        backends=backends,
+        probe=probe,
+        registry=registry,
+        advertise_host=advertise_host,
+        log_path=log_dir / "serve.log" if log_dir else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -424,13 +466,47 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--once", action="store_true", help="Send one heartbeat then exit (smoke test).")
     ap.add_argument("--log-dir", type=Path, default=RUNTIME_DIR)
     ap.add_argument("--print-heartbeat", action="store_true", help="Print first heartbeat as JSON to stdout.")
+    ap.add_argument(
+        "--tailnet",
+        action="store_true",
+        help="Advertise over a Tailscale/Headscale tailnet (bind 0.0.0.0, "
+        "advertise a MagicDNS host). Also enabled via SLANCHA_TAILNET_ENABLED=1.",
+    )
+    ap.add_argument(
+        "--advertise-host",
+        default=None,
+        help="MagicDNS host the registry advertises (overrides auto-discovery "
+        "via `tailscale status --json`). Implies --tailnet.",
+    )
+    ap.add_argument(
+        "--bind-host",
+        default=None,
+        help="Host the model backends bind to (default 0.0.0.0 under --tailnet, "
+        "else 127.0.0.1).",
+    )
     args = ap.parse_args(argv)
+
+    # CLI flags layer on top of SLANCHA_TAILNET_* env defaults.
+    tailnet = TailnetConfig.from_env()
+    if args.tailnet or args.advertise_host or args.bind_host:
+        tailnet = replace(
+            tailnet,
+            enabled=True,
+            advertise_host=args.advertise_host or tailnet.advertise_host,
+            bind_host=args.bind_host or tailnet.bind_host,
+        )
 
     daemon = build_daemon(
         specialist_ids=args.specialist,
         base_port=args.base_port,
         log_dir=args.log_dir,
+        tailnet=tailnet,
     )
+    if tailnet.enabled:
+        daemon._log(
+            f"[main] tailnet on: bind={tailnet.bind_host} "
+            f"advertise={daemon.advertise_host or '(unresolved — check tailscale status)'}"
+        )
 
     ok = daemon.start(wait_ready=True, ready_timeout=args.ready_timeout)
     if not ok:
