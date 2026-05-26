@@ -1,26 +1,26 @@
-"""Cross-repo schema-pin: validate the canonical fixture against slancha-api.
+"""Cross-repo schema-pin: validate the canonical fixture against the published
+MeshUsageEvent JSON Schema in slancha-shared (PUBLIC).
 
-The fixture lives in this repo (mesh/contracts/mesh_usage_event.json) and
-is the SINGLE source of truth for the §6 telemetry wire shape between
-slancha-local (emitter) and slancha-api (receiver).
+The fixture (mesh/contracts/mesh_usage_event.json) is the golden trace for the
+§6 telemetry wire shape between slancha-local (emitter) and slancha-api
+(receiver). The canonical schema is published at
+`slancha-shared/schemas/mesh-usage-event.schema.json`, generated from
+slancha-api's `MeshUsageEvent` Pydantic (by_alias).
 
-This test runs from the slancha-mesh repo. It validates the fixture
-against the slancha-api MeshUsageEvent Pydantic class IF slancha-api is
-checked out alongside slancha-mesh as a sibling directory; otherwise
-it skips cleanly so CI in repos that don't have the sibling still
-passes. The companion tests in slancha-api and slancha-local do the
-mirror validations from their side.
+This validates the fixture against that **public** schema — no private
+slancha-api checkout (that path 404'd in CI: private repo + default token).
+The companion check in slancha-api regenerates + diffs the schema from its
+side, so drift in either direction is caught.
 
-If this test fails: the fixture and the slancha-api Pydantic disagree.
-That's a wire-protocol break — fix one or the other and update the
-fixture-version in _meta.
+Locates a sibling slancha-shared checkout (`SLANCHA_SHARED_PATH` env, else
+`../slancha-shared`); skips cleanly when absent so dev without the sibling
+still passes. The api-independent structural pins below always run.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -28,91 +28,66 @@ import pytest
 from mesh.contracts import MESH_USAGE_EVENT_FIXTURE
 
 
-def _slancha_api_path() -> Path | None:
-    """Locate a sibling slancha-api checkout, if one exists.
+def _shared_schema_path() -> Path | None:
+    """Locate slancha-shared's published schema, if the sibling is on disk.
 
-    Override via SLANCHA_API_PATH env var. Default: ../slancha-api next
-    to this repo. Returns None when no sibling is on disk → test skips.
+    Override via SLANCHA_SHARED_PATH (points at the slancha-shared repo root).
+    Default: ../slancha-shared next to this repo. Returns None → test skips.
     """
-    env = os.environ.get("SLANCHA_API_PATH")
-    candidate = Path(env) if env else Path(__file__).resolve().parents[2].parent / "slancha-api"
-    return candidate if (candidate / "app" / "endpoints" / "admin.py").exists() else None
-
-
-@pytest.fixture(scope="module")
-def slancha_api_mesh_usage_event_cls():
-    api_root = _slancha_api_path()
-    if api_root is None:
-        pytest.skip(
-            "sibling slancha-api checkout not found — cross-repo "
-            "validation skipped. Set SLANCHA_API_PATH or check out alongside."
-        )
-
-    # Add slancha-api to sys.path so we can import its app.endpoints.admin
-    # without polluting installed packages.
-    api_root_str = str(api_root)
-    if api_root_str not in sys.path:
-        sys.path.insert(0, api_root_str)
-
-    # Avoid surfacing any of slancha-api's runtime config requirements —
-    # we're only importing the Pydantic class. Set minimum env vars that
-    # slancha-api's Settings expects.
-    os.environ.setdefault("UNKEY_ROOT_KEY", "test")
-    os.environ.setdefault("UNKEY_API_ID", "test")
-    os.environ.setdefault("ROUTER_DEVICE", "cpu")
-
-    try:
-        from app.endpoints.admin import MeshUsageEvent  # type: ignore[import-not-found]
-    except Exception as exc:
-        pytest.skip(f"failed to import slancha-api MeshUsageEvent: {exc}")
-    return MeshUsageEvent
+    env = os.environ.get("SLANCHA_SHARED_PATH")
+    root = Path(env) if env else Path(__file__).resolve().parents[2].parent / "slancha-shared"
+    schema = root / "schemas" / "mesh-usage-event.schema.json"
+    return schema if schema.exists() else None
 
 
 def _fixture_payload() -> dict:
     raw = json.loads(MESH_USAGE_EVENT_FIXTURE.read_text())
-    # _meta is documentation; not part of the wire shape.
-    raw.pop("_meta", None)
+    raw.pop("_meta", None)  # _meta is documentation, not part of the wire shape
     return raw
 
 
-def test_fixture_validates_against_slancha_api_pydantic(slancha_api_mesh_usage_event_cls):
-    """The fixture must round-trip cleanly through MeshUsageEvent."""
-    payload = _fixture_payload()
-    event = slancha_api_mesh_usage_event_cls.model_validate(payload)
-
-    # Spot-check that the dotted-name OTel aliases land on the underscored
-    # attributes — that's the slancha-api side of the alias contract.
-    assert event.request_id == payload["request_id"]
-    assert event.gen_ai_request_model == payload["gen_ai.request.model"]
-    assert event.gen_ai_usage_input_tokens == payload["gen_ai.usage.input_tokens"]
-    assert event.otel_semconv_version == payload["otel_semconv_version"]
+@pytest.fixture(scope="module")
+def shared_schema() -> dict:
+    path = _shared_schema_path()
+    if path is None:
+        pytest.skip(
+            "sibling slancha-shared checkout not found — set SLANCHA_SHARED_PATH "
+            "or check out ../slancha-shared. Cross-repo validation skipped."
+        )
+    return json.loads(path.read_text())
 
 
-def test_fixture_round_trips_via_model_dump_by_alias(slancha_api_mesh_usage_event_cls):
-    """Dumping the parsed event must re-produce the dotted-name keys.
+def test_fixture_validates_against_shared_schema(shared_schema):
+    """The canonical fixture must validate against the published JSON Schema.
 
-    Without this round-trip property, the SIDECAR (which builds payloads
-    with dotted-name keys per OTel) could pass validation but produce
-    something a re-consumer couldn't parse the same way.
+    If this fails: the fixture and the published MeshUsageEvent schema disagree
+    — a wire-protocol break. Fix one or the other and bump _meta.fixture_version
+    (and, if the schema changed, regenerate it in slancha-api).
     """
-    payload = _fixture_payload()
-    event = slancha_api_mesh_usage_event_cls.model_validate(payload)
-    dumped = event.model_dump(by_alias=True, exclude_none=True)
+    jsonschema = pytest.importorskip("jsonschema")
+    jsonschema.validate(_fixture_payload(), shared_schema)
 
-    # The dotted-name OTel keys must reappear in the dump.
-    assert "gen_ai.request.model" in dumped
-    assert "gen_ai.usage.input_tokens" in dumped
-    assert "gen_ai.usage.output_tokens" in dumped
+
+def test_shared_schema_declares_otel_dotted_aliases(shared_schema):
+    """The OTel dotted-name aliases are part of the wire contract (H19)."""
+    props = shared_schema.get("properties", {})
+    for key in ("gen_ai.request.model", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens"):
+        assert key in props, f"shared schema missing OTel alias {key!r}"
+
+
+def test_fixture_carries_otel_dotted_keys():
+    """Fixture side of the alias contract — runs without the sibling."""
+    payload = _fixture_payload()
+    assert payload["gen_ai.request.model"] == payload["model"]
+    assert payload["gen_ai.usage.input_tokens"] == payload["tokens_in"]
+    assert payload["gen_ai.usage.output_tokens"] == payload["tokens_out"]
 
 
 def test_decision_reason_structured_shape_pinned():
     """The structured decision-reason shape (NC5) is part of the wire.
 
-    This test runs without slancha-api present — it pins the SHAPE of
-    decision_reason regardless of cross-repo availability. If anyone
-    changes the structured-decision-reason vocabulary in the fixture,
-    Phase 5 select_mesh_route_with_pref's emitter and the routing-
-    transparency UI both need a coordinated update.
+    Runs without slancha-shared present — it pins the SHAPE of decision_reason
+    (a dict[str, Any] in the Pydantic, so JSON Schema can't enforce it).
     """
     payload = _fixture_payload()
     dr = payload["decision_reason"]
@@ -122,9 +97,8 @@ def test_decision_reason_structured_shape_pinned():
 
 
 def test_fixture_carries_meta_self_documentation():
-    """The fixture file must keep its _meta block so the schema-pin
-    relationship between repos is discoverable from the file alone.
-    """
+    """The fixture must keep its _meta block so the schema-pin relationship
+    between repos is discoverable from the file alone."""
     raw = json.loads(MESH_USAGE_EVENT_FIXTURE.read_text())
     assert "_meta" in raw
     meta = raw["_meta"]

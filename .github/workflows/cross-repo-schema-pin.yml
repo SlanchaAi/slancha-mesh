@@ -1,14 +1,16 @@
 name: cross-repo-schema-pin
 
 # Validates the canonical fixture at mesh/contracts/mesh_usage_event.json
-# against the slancha-api MeshUsageEvent Pydantic.
+# against the published MeshUsageEvent JSON Schema in slancha-shared (PUBLIC),
+# generated from the slancha-api MeshUsageEvent Pydantic.
 #
 # Catches drift in either direction:
 #   - someone edits the fixture in a wire-incompatible way → this fails
-#   - someone tightens MeshUsageEvent in slancha-api → this fails
+#   - slancha-api tightens MeshUsageEvent + republishes the schema → this fails
 #
-# Companion tests in slancha-api and slancha-local pin the relationship
-# from those sides.
+# Why slancha-shared (not a direct slancha-api checkout): slancha-api is
+# PRIVATE, so checking it out here with the repo-scoped default GITHUB_TOKEN
+# 404'd. slancha-shared is public; slancha-api owns regenerating the schema.
 
 on:
   pull_request:
@@ -41,17 +43,14 @@ jobs:
         with:
           path: slancha-mesh
 
-      - name: Checkout slancha-api (sibling for Pydantic import)
+      - name: Checkout slancha-shared (public — canonical schema)
         uses: actions/checkout@v5
         with:
-          repository: SlanchaAi/slancha-api
-          # main is canonical here; the substrate work is on
-          # feat/mesh-substrate today + will land on main when shipped.
+          repository: SlanchaAi/slancha-shared
+          # PUBLIC → default GITHUB_TOKEN can read it (no PAT). Hosts
+          # schemas/mesh-usage-event.schema.json.
           ref: main
-          path: slancha-api
-          # Cross-repo PR-validation: if a slancha-mesh PR depends on an
-          # unmerged slancha-api change, override with a workflow_dispatch
-          # input or a temporary ref override here.
+          path: slancha-shared
 
       - uses: actions/setup-python@v5
         with:
@@ -61,19 +60,12 @@ jobs:
         working-directory: slancha-mesh
         run: |
           pip install --upgrade pip
-          pip install -e .[dev]
-
-      - name: Install slancha-api Pydantic-only deps
-        # The schema-pin test imports app.schemas.mesh_usage which has
-        # zero slancha-api-specific imports (just pydantic). So we don't
-        # need to pip-install slancha-api itself — pydantic is already
-        # pulled in by slancha-mesh.
-        run: pip install pydantic
+          pip install -e .[dev]   # includes jsonschema
 
       - name: Run cross-repo schema-pin
         working-directory: slancha-mesh
         env:
-          SLANCHA_API_PATH: ${{ github.workspace }}/slancha-api
+          SLANCHA_SHARED_PATH: ${{ github.workspace }}/slancha-shared
         run: |
           pytest -q mesh/tests/test_cross_repo_usage_event.py
 
