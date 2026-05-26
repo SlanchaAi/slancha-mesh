@@ -126,7 +126,22 @@ def _detect_cuda_capability(warnings: list[str]) -> str | None:
 
 
 def _detect_memory_gb(warnings: list[str]) -> tuple[float, float]:
-    """Return (ram_total_gb, ram_available_gb)."""
+    """Return (ram_total_gb, ram_available_gb). Cross-OS via psutil.
+
+    psutil (a hard dependency) reports total + available on Windows, Linux,
+    and macOS — so this is the primary path. The /proc/meminfo + sysctl paths
+    below are kept only as a defensive fallback if psutil is somehow
+    unavailable. (Before this, Windows hit neither OS-specific path and
+    reported 0.0 — found on a real GTX-1070 Win10 box, 2026-05-26.)
+    """
+    try:
+        import psutil
+
+        vm = psutil.virtual_memory()
+        if vm.total > 0:
+            return vm.total / (1024**3), vm.available / (1024**3)
+    except Exception:  # noqa: BLE001 — fall back to OS-specific probes
+        pass
     try:
         meminfo = Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore")
         total = avail = 0.0
