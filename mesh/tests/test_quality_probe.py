@@ -88,15 +88,15 @@ def test_probe_runner_returns_observation_with_expected_count(monkeypatch):
 
     runner = ProbeRunner()
     obs = runner.probe_one(
-        specialist_id="paul-voice-v8",
-        model_id="paul-voice-v8",
+        specialist_id="demo-model-v2",
+        model_id="demo-model-v2",
         node_url="http://node:8000/v1",
         domain="writing",
     )
 
     # The default probe set has a writing entry + a general entry that
     # also matches (writing or general); 2 applicable.
-    assert obs.specialist_id == "paul-voice-v8"
+    assert obs.specialist_id == "demo-model-v2"
     assert obs.sample_count == 2
     assert obs.score > 0.0
     assert obs.observation_source == "synthetic"
@@ -106,8 +106,8 @@ def test_probe_runner_empty_response_yields_zero_score(monkeypatch):
     _patched_send_chat(monkeypatch, response_text="")
     runner = ProbeRunner()
     obs = runner.probe_one(
-        specialist_id="paul-voice-v8",
-        model_id="paul-voice-v8",
+        specialist_id="demo-model-v2",
+        model_id="demo-model-v2",
         node_url="http://node:8000/v1",
         domain="writing",
     )

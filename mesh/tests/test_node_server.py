@@ -58,7 +58,7 @@ def test_heartbeat_is_visible_in_models_with_advertised_host():
     to the advertised MagicDNS name."""
     from mesh.registry import MeshRegistry
 
-    card = _card("paul-voice")
+    card = _card("demo-model")
     registry = MeshRegistry(catalog=[card])
     backend = NullBackend(card=card, base_url="http://0.0.0.0:8004")
     daemon = ServeDaemon(
@@ -75,7 +75,7 @@ def test_heartbeat_is_visible_in_models_with_advertised_host():
     resp = client.get("/models", params={"include": "routing_meta"})
     assert resp.status_code == 200
     data = {m["id"]: m for m in resp.json()["data"]}
-    assert "paul-voice" in data
-    node_urls = data["paul-voice"]["routing_meta"]["node_urls"]
+    assert "demo-model" in data
+    node_urls = data["demo-model"]["routing_meta"]["node_urls"]
     assert node_urls == ["http://test-box.taila.ts.net:8004"]
     assert all("0.0.0.0" not in u and "127.0.0.1" not in u for u in node_urls)

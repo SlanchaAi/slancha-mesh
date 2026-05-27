@@ -13,7 +13,7 @@
   "request_id": "00000000-0000-4000-8000-000000000001",
   "user_id": "00000000-0000-0000-0000-000000000aaa",
   "endpoint": "/v1/chat/completions",
-  "model": "paul-voice-v8",
+  "model": "demo-model-v2",
   "route": "mesh",
   "tokens_in": 230,
   "tokens_out": 1247,
@@ -37,7 +37,7 @@
     "winner": "paul-v8-essay-dpo-iter1-beta-0.1",
     "alternatives_considered": [
       {
-        "id": "paul-voice-v7d",
+        "id": "demo-model-v1",
         "delta": 0.13,
         "losing_axes": ["quality"]
       },
@@ -51,7 +51,7 @@
     "preset_applied": "balanced"
   },
 
-  "gen_ai.request.model": "paul-voice-v8",
+  "gen_ai.request.model": "demo-model-v2",
   "gen_ai.usage.input_tokens": 230,
   "gen_ai.usage.output_tokens": 1247,
   "otel_semconv_version": "1.36.0+dev"

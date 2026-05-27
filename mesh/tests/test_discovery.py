@@ -139,7 +139,7 @@ def _fetch_factory():
     """Return a fetch(host, port) that serves per-host model payloads."""
     served = {
         "gb10-self.taila.ts.net": _models_payload("qwen3-coder", 8003),
-        "mac-mini.taila.ts.net": _models_payload("paul-voice", 8004, domain="writing"),
+        "mac-mini.taila.ts.net": _models_payload("demo-model", 8004, domain="writing"),
     }
 
     def fetch(host: str, port: int):
@@ -151,8 +151,8 @@ def _fetch_factory():
 def test_discover_aggregates_specialists_across_peers():
     result = discover_specialists(_STATUS, fetch=_fetch_factory())
     assert isinstance(result, DiscoveryResult)
-    assert set(result.specialists) == {"qwen3-coder", "paul-voice"}
-    assert result.specialists["paul-voice"].domain == "writing"
+    assert set(result.specialists) == {"qwen3-coder", "demo-model"}
+    assert result.specialists["demo-model"].domain == "writing"
 
 
 def test_discover_host_pins_node_url_to_dialed_peer():
@@ -174,7 +174,7 @@ def test_discover_marks_unreachable_peers():
     assert "gb10-self.taila.ts.net" in result.reachable
     assert "mac-mini.taila.ts.net" in result.unreachable
     assert "qwen3-coder" in result.specialists
-    assert "paul-voice" not in result.specialists
+    assert "demo-model" not in result.specialists
 
 
 def test_discover_merges_same_specialist_on_multiple_nodes():

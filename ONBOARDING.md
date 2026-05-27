@@ -147,7 +147,7 @@ bespoke setup.
    serve daemon binds `0.0.0.0` and advertises your MagicDNS host:
    ```bash
    python -m mesh.serve --tailnet \
-     --specialist paul-voice --base-port 8003
+     --specialist demo-model --base-port 8003
    ```
    Each loaded specialist now heartbeats a `node_url` of
    `http://<your-magicdns>:<port>` — reachable by the gateway over WireGuard.

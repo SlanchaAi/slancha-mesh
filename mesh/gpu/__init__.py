@@ -1,6 +1,6 @@
 """GPU coordination — shared-host scheduling between multiple users.
 
-Operator + willard both run workloads on the same Spark GB10 today.
+Two users run workloads on the same Spark GB10 today.
 nvidia-smi alone tells you who's USING the GPU; it doesn't tell you who
 INTENDS to use it next or how much memory they need. This subpackage
 adds:
@@ -16,7 +16,7 @@ host has claimed N GB for D duration. Phase 2 (v0.0.7+) wires
 reservations into the mesh service so they're visible cluster-wide.
 
 Why file-based rather than mesh-service backed: zero infra dependency.
-Operator + willard can use this today against a shared filesystem
+Two users can use this today against a shared filesystem
 without the mesh service needing to be up. The contract is a directory
 + one JSON file per reservation; trivial to inspect with `ls + cat`.
 """

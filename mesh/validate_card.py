@@ -2,7 +2,7 @@
 
 Caught here (instead of at test_each_card_is_specialist_card time):
 - Pydantic validation errors (missing required fields, wrong types)
-- runtime_gb < storage_gb (the invariant that broke when paul-voice-v7d
+- runtime_gb < storage_gb (the invariant that broke when demo-model-v1
   landed with runtime_gb=48 storage_gb=54)
 - Unknown capability strings — typos like "tooluse" instead of "tools"
 - Unknown domains — typos like "wrtiing" instead of "writing"
@@ -12,7 +12,7 @@ Caught here (instead of at test_each_card_is_specialist_card time):
 
 Usage:
     python -m mesh.validate_card                                # lint all in mesh/catalog/
-    python -m mesh.validate_card mesh/catalog/paul-voice-v8.toml  # one file
+    python -m mesh.validate_card mesh/catalog/demo-model-v2.toml  # one file
     python -m mesh.validate_card --all                          # equivalent to no-args
     python -m mesh.validate_card --strict                       # also fail on warnings
 

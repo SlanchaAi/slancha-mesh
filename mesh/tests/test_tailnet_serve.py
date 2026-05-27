@@ -62,8 +62,8 @@ def test_registry_binds_per_loaded_model_url():
     """Each loaded model's own node_url lands on its binding — distinct
     ports on the same MagicDNS host route to the right backend."""
     now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-    code = _card("paul-voice", "code")
-    voice = _card("paul-voice-v8", "writing")
+    code = _card("demo-model", "code")
+    voice = _card("demo-model-v2", "writing")
     reg = MeshRegistry(catalog=[code, voice])
     host = "gb10-1.tnet-example.ts.net"
     hb = NodeHeartbeat(
@@ -71,9 +71,9 @@ def test_registry_binds_per_loaded_model_url():
         ts=now,
         hardware=_probe(),
         loaded_models=[
-            LoadedModel(specialist_id="paul-voice", model_id="test/paul-voice",
+            LoadedModel(specialist_id="demo-model", model_id="test/demo-model",
                         loaded_at=now, node_url=f"http://{host}:8003"),
-            LoadedModel(specialist_id="paul-voice-v8", model_id="test/paul-voice-v8",
+            LoadedModel(specialist_id="demo-model-v2", model_id="test/demo-model-v2",
                         loaded_at=now, node_url=f"http://{host}:8004"),
         ],
         util=NodeUtilization(queue_depth=0),
@@ -81,28 +81,28 @@ def test_registry_binds_per_loaded_model_url():
     reg.record_heartbeat(HeartbeatPostRequest(heartbeat=hb, node_url=f"http://{host}:8003"))
     snap = reg.snapshot(now=now)
 
-    assert snap.specialists["paul-voice"][0].node_url == f"http://{host}:8003"
-    assert snap.specialists["paul-voice-v8"][0].node_url == f"http://{host}:8004"
+    assert snap.specialists["demo-model"][0].node_url == f"http://{host}:8003"
+    assert snap.specialists["demo-model-v2"][0].node_url == f"http://{host}:8004"
 
 
 def test_registry_falls_back_to_node_level_url_when_loaded_model_url_absent():
     """Old nodes that don't set per-model node_url still resolve via the
     node-level HeartbeatPostRequest.node_url (back-compat)."""
     now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-    card = _card("paul-voice", "code")
+    card = _card("demo-model", "code")
     reg = MeshRegistry(catalog=[card])
     hb = NodeHeartbeat(
         node_id="gb10-1",
         ts=now,
         hardware=_probe(),
         loaded_models=[
-            LoadedModel(specialist_id="paul-voice", model_id="test/paul-voice", loaded_at=now)
+            LoadedModel(specialist_id="demo-model", model_id="test/demo-model", loaded_at=now)
         ],  # node_url omitted
         util=NodeUtilization(queue_depth=0),
     )
     reg.record_heartbeat(HeartbeatPostRequest(heartbeat=hb, node_url="http://gb10-1.ts.net:8003"))
     snap = reg.snapshot(now=now)
-    assert snap.specialists["paul-voice"][0].node_url == "http://gb10-1.ts.net:8003"
+    assert snap.specialists["demo-model"][0].node_url == "http://gb10-1.ts.net:8003"
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +114,8 @@ def test_daemon_advertises_magicdns_per_specialist():
     """Two backends on distinct ports + advertise_host → heartbeat carries
     a MagicDNS URL per specialist with the correct port."""
     host = "gb10-1.tnet-example.ts.net"
-    code = _card("paul-voice", "code")
-    voice = _card("paul-voice-v8", "writing")
+    code = _card("demo-model", "code")
+    voice = _card("demo-model-v2", "writing")
     be_code = NullBackend(card=code, base_url="http://0.0.0.0:8003")
     be_voice = NullBackend(card=voice, base_url="http://0.0.0.0:8004")
     reg = MeshRegistry(catalog=[code, voice])
@@ -126,8 +126,8 @@ def test_daemon_advertises_magicdns_per_specialist():
     daemon.post_heartbeat()
     snap = reg.snapshot()
 
-    assert snap.specialists["paul-voice"][0].node_url == f"http://{host}:8003"
-    assert snap.specialists["paul-voice-v8"][0].node_url == f"http://{host}:8004"
+    assert snap.specialists["demo-model"][0].node_url == f"http://{host}:8003"
+    assert snap.specialists["demo-model-v2"][0].node_url == f"http://{host}:8004"
 
     # Real routing hands the gateway the right tailnet URL.
     result = select_mesh_route(
@@ -140,14 +140,14 @@ def test_daemon_advertises_magicdns_per_specialist():
 
 def test_daemon_without_advertise_host_keeps_loopback():
     """Back-compat: no advertise_host → loopback URL unchanged."""
-    card = _card("paul-voice", "code")
+    card = _card("demo-model", "code")
     be = NullBackend(card=card, base_url="http://127.0.0.1:8003")
     reg = MeshRegistry(catalog=[card])
     daemon = ServeDaemon(backends=[be], probe=_probe(), registry=reg)  # no advertise_host
     daemon.start(wait_ready=True, ready_timeout=1.0)
     daemon.post_heartbeat()
     snap = reg.snapshot()
-    assert snap.specialists["paul-voice"][0].node_url == "http://127.0.0.1:8003"
+    assert snap.specialists["demo-model"][0].node_url == "http://127.0.0.1:8003"
     daemon.stop()
 
 
@@ -157,7 +157,7 @@ def test_daemon_without_advertise_host_keeps_loopback():
 
 
 def test_build_backend_binds_to_configured_host():
-    card = _card("paul-voice", "code")
+    card = _card("demo-model", "code")
     be = build_backend(card, port=8003, bind_host="0.0.0.0")
     assert isinstance(be, VLLMBackend)
     assert be.host == "0.0.0.0"
@@ -165,7 +165,7 @@ def test_build_backend_binds_to_configured_host():
 
 
 def test_build_backend_defaults_to_loopback():
-    card = _card("paul-voice", "code")
+    card = _card("demo-model", "code")
     be = build_backend(card, port=8003)
     assert isinstance(be, VLLMBackend)
     assert be.host == "127.0.0.1"

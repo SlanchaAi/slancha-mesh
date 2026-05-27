@@ -1,6 +1,6 @@
 # Joining slancha-mesh as a specialist node
 
-A how-to for the agent setting up James's machine. Goal: get James's box
+A how-to for the agent setting up a contributor's machine. Goal: get the contributor's box
 serving a model the mesh can route to, with the least possible human touch.
 
 ## TL;DR — the one-liner

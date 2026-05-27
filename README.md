@@ -34,7 +34,7 @@ slancha-mesh discover                        # any consumer: walk the tailnet â†
 Discovery is **pull-based**: a consumer walks `tailscale status` for
 `tag:specialist` peers and pulls each node's `/models` over the tailnet â€” no
 heartbeat-push, no central registry, no shared token. Tailnet membership +
-the ACL is the credential. Contributor walkthrough: `JAMES_NODE_SETUP.md`.
+the ACL is the credential. Contributor walkthrough: `NODE_SETUP.md`.
 
 ## What ships (current state)
 
