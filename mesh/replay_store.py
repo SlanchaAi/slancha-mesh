@@ -57,6 +57,11 @@ class ReplayEntry:
     # Optional: per-token cost of the oracle response (helps prioritize
     # high-cost prompts for distillation).
     oracle_cost_usd: float | None = None
+    # Optional: cached LLM-judge score for this pair + which judge produced
+    # it, so a later training pass can filter/weight by quality without
+    # re-running the judge.
+    judge_score: float | None = None
+    judge_source: str | None = None
 
     def to_jsonl(self) -> str:
         d = asdict(self)
@@ -67,6 +72,10 @@ class ReplayEntry:
     def from_jsonl(cls, line: str) -> "ReplayEntry":
         d = json.loads(line)
         d["captured_at"] = datetime.fromisoformat(d["captured_at"])
+        # Backward-compat: lines written before these fields existed lack
+        # the keys; default them to None so legacy corpora still load.
+        d["judge_score"] = d.get("judge_score")
+        d["judge_source"] = d.get("judge_source")
         return cls(**d)
 
 

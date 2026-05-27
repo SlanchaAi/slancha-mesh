@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -106,6 +107,92 @@ class StubScorer:
 
         raw = math.log(len(response_text.strip()) + 1)
         return max(0.0, min(5.0, raw))
+
+
+class ScorerError(Exception):
+    """Raised when the LLM-judge scorer cannot produce a usable score.
+
+    Transport failure, non-2xx, missing/malformed content, or no
+    parseable integer in the judge reply all surface as this. Unlike the
+    never-raise probe path, a judge fault is NOT a specialist's 0 — the
+    caller must be able to tell "specialist answered badly" from "scorer
+    broke".
+    """
+
+
+class LocalJudgeScorer:
+    """LLM-as-judge scorer against a local OpenAI-compatible endpoint.
+
+    Sends a short deterministic judge prompt (temperature 0) asking the
+    model to rate, as a single integer 0–5, how well a probe response
+    answers the probe — judged against `probe.reference` when one is set.
+    Parses the first integer from the reply and clamps to [0.0, 5.0].
+
+    Satisfies the `Scorer` protocol structurally. Scoring failures raise
+    `ScorerError`; the module never raises at import (httpx is imported
+    lazily inside `score`, matching the repo's other HTTP call sites).
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        api_key: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> None:
+        self.base_url = base_url
+        self.model = model
+        self.api_key = api_key
+        self.timeout_s = timeout_s
+
+    def _judge_messages(self, probe: ProbePrompt, response_text: str) -> list[dict]:
+        """Build the deterministic judge chat messages."""
+        system = (
+            "You are a strict grader. Rate, as a single INTEGER from 0 to 5, "
+            "how well the RESPONSE answers the PROMPT (0=worst, 5=best). "
+            "Reply with ONLY the integer, no words."
+        )
+        parts = [f"PROMPT:\n{probe.text}"]
+        if probe.reference:
+            parts.append(f"REFERENCE ANSWER:\n{probe.reference}")
+        parts.append(f"RESPONSE:\n{response_text}")
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(parts)},
+        ]
+
+    def score(self, probe: ProbePrompt, response_text: str) -> float:
+        import httpx
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            resp = httpx.post(
+                f"{self.base_url.rstrip('/')}/v1/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": self._judge_messages(probe, response_text),
+                    "temperature": 0,
+                },
+                headers=headers,
+                timeout=self.timeout_s,
+            )
+        except (httpx.HTTPError, ConnectionError) as exc:
+            raise ScorerError(f"judge request failed: {type(exc).__name__}") from exc
+        if not 200 <= resp.status_code < 300:
+            raise ScorerError(f"judge returned HTTP {resp.status_code}")
+        try:
+            content = resp.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ScorerError("judge response missing assistant content") from exc
+        if not isinstance(content, str):
+            raise ScorerError("judge content is not text")
+        m = re.search(r"\d+", content)
+        if m is None:
+            raise ScorerError(f"no integer in judge reply: {content!r}")
+        return max(0.0, min(5.0, float(int(m.group()))))
 
 
 # ── Probe observation ──────────────────────────────────────────────────────

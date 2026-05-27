@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -13,8 +14,10 @@ from mesh.quality_probe import (
     DEFAULT_DRIFT_THRESHOLD,
     DEFAULT_PROBE_SET,
     DriftEvent,
+    LocalJudgeScorer,
     ProbeRunner,
     QualityObservation,
+    ScorerError,
     StubScorer,
     detect_drift,
 )
@@ -72,6 +75,55 @@ def test_stub_scorer_monotone_on_length():
     short = StubScorer().score(DEFAULT_PROBE_SET[0], "hello world")
     long = StubScorer().score(DEFAULT_PROBE_SET[0], "hello world" * 20)
     assert long >= short
+
+
+# ── LocalJudgeScorer — LLM-judge over a mocked httpx.post ────────────────────
+
+
+class _StubResponse:
+    def __init__(self, status_code: int, body: dict | None = None) -> None:
+        self.status_code = status_code
+        self._body = body or {}
+
+    def json(self) -> dict:
+        return self._body
+
+
+def _stub_httpx_post(monkeypatch, *, status_code: int = 200, content: str = "4"):
+    """Patch httpx.post to return a canned chat-completions response."""
+    body = {"choices": [{"message": {"content": content}}]}
+
+    def _post(url, json=None, headers=None, timeout=None):
+        return _StubResponse(status_code, body)
+
+    monkeypatch.setattr(httpx, "post", _post)
+
+
+def test_local_judge_scorer_parses_integer(monkeypatch):
+    _stub_httpx_post(monkeypatch, status_code=200, content="4")
+    scorer = LocalJudgeScorer(base_url="http://localhost:11434", model="judge")
+    assert scorer.score(DEFAULT_PROBE_SET[0], "some response") == 4.0
+
+
+def test_local_judge_scorer_clamps_above_five(monkeypatch):
+    """A judge that emits '9' is clamped to the 5.0 ceiling."""
+    _stub_httpx_post(monkeypatch, status_code=200, content="9")
+    scorer = LocalJudgeScorer(base_url="http://localhost:11434", model="judge")
+    assert scorer.score(DEFAULT_PROBE_SET[0], "great answer") == 5.0
+
+
+def test_local_judge_scorer_raises_on_non_2xx(monkeypatch):
+    _stub_httpx_post(monkeypatch, status_code=503, content="4")
+    scorer = LocalJudgeScorer(base_url="http://localhost:11434", model="judge")
+    with pytest.raises(ScorerError):
+        scorer.score(DEFAULT_PROBE_SET[0], "x")
+
+
+def test_local_judge_scorer_raises_on_unparseable_reply(monkeypatch):
+    _stub_httpx_post(monkeypatch, status_code=200, content="not a number")
+    scorer = LocalJudgeScorer(base_url="http://localhost:11434", model="judge")
+    with pytest.raises(ScorerError):
+        scorer.score(DEFAULT_PROBE_SET[0], "x")
 
 
 # ── ProbeRunner — uses an HTTP stub ─────────────────────────────────────────

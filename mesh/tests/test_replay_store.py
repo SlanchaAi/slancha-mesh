@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +43,45 @@ def test_entry_jsonl_roundtrip():
     line = e.to_jsonl()
     back = ReplayEntry.from_jsonl(line)
     assert back == e
+
+
+def test_entry_jsonl_roundtrip_judge_fields():
+    """judge_score / judge_source survive a to_jsonl → from_jsonl round-trip."""
+    now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc)
+    e = ReplayEntry(
+        prompt_hash="abc",
+        prompt_text="What is 2+2?",
+        oracle_response="4",
+        domain="math",
+        difficulty="easy",
+        captured_at=now,
+        judge_score=4.0,
+        judge_source="local-judge:qwen3-7b",
+    )
+    back = ReplayEntry.from_jsonl(e.to_jsonl())
+    assert back == e
+    assert back.judge_score == 4.0
+    assert back.judge_source == "local-judge:qwen3-7b"
+
+
+def test_from_jsonl_legacy_line_without_judge_fields_loads_none():
+    """Lines persisted before the judge fields existed must still load,
+    with both new fields defaulting to None."""
+    legacy = json.dumps(
+        {
+            "prompt_hash": "abc",
+            "prompt_text": "q",
+            "oracle_response": "a",
+            "domain": "general",
+            "difficulty": "easy",
+            "captured_at": "2026-05-16T12:00:00+00:00",
+            "served_by_specialist": None,
+            "oracle_cost_usd": None,
+        }
+    )
+    e = ReplayEntry.from_jsonl(legacy)
+    assert e.judge_score is None
+    assert e.judge_source is None
 
 
 # ---------------------------------------------------------------------------
