@@ -3,7 +3,7 @@
 > Status: **design scope** (2026-05-27). Captures the architecture, the
 > closed self-improvement loop, what already exists vs. what must be built,
 > the phased plan, and the persona-review findings. Audience: future-me who
-> forgot everything. Companion to `SLANCHA_PROTOCOL_v0.1_DRAFT.md`.
+> forgot everything.
 
 ## The vision (one breath)
 

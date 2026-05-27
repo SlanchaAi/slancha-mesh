@@ -13,7 +13,7 @@
 ##   slancha serve
 ##
 ## Cross-machine: run the registry on a tailnet host (tag:gateway) and have
-## tagged specialist nodes heartbeat to it — see docs/SLANCHA_PROTOCOL_v0.1_DRAFT.md.
+## tagged specialist nodes heartbeat to it — see docs/SELF_ORGANIZING_LOOP_SCOPE.md.
 ## Auth: set SLANCHA_NODE_TOKEN to require Bearer on every endpoint but /health.
 
 services:

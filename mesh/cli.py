@@ -8,7 +8,7 @@ expose a live, pull-able self-description on the node-info port. The gateway
 routing table — no heartbeat-push, no central registry, no shared write
 token. Tailnet membership + the ACL is the credential.
 
-Design + rationale: the README
+Design + rationale: docs/SELF_ORGANIZING_LOOP_SCOPE.md
 """
 
 from __future__ import annotations
