@@ -137,4 +137,4 @@ discover_specialists`) the slancha-api gateway uses to build its routing
 table — so an external OSS adopter with their own tailnet gets a working mesh
 with zero central infrastructure, and the cloud is just one consumer of that
 discovery path. Full design + the push-vs-pull decision:
-`the README`.
+`docs/SELF_ORGANIZING_LOOP_SCOPE.md`.

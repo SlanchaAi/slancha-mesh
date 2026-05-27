@@ -101,7 +101,7 @@ pull-able self-description on `:8088`. Discovery is **pull-based** — the
 gateway finds the node by walking the tailnet (`slancha-mesh discover`), so
 there's no registry URL, node token, or per-node gateway config. Verify with
 `slancha-mesh status` (tailnet identity + specialist-readiness). Full
-design: `the README`.
+design: `docs/SELF_ORGANIZING_LOOP_SCOPE.md`.
 
 The manual steps below are what `up` automates — keep them for debugging or a
 bespoke setup.

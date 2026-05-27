@@ -1,8 +1,7 @@
 """Slancha-Mesh v0 — personal mesh of specialist small models.
 
-See `the README` for the current design (the v0
-spec is archived at `the README`). This package
-implements the v0.0.1 minimal viable mesh:
+See `docs/SELF_ORGANIZING_LOOP_SCOPE.md` for the current design. This
+package implements the v0.0.1 minimal viable mesh:
 
 - `probe`     — hardware probe → NodeProbe JSON
 - `catalog`   — specialist TOML cards
@@ -10,8 +9,8 @@ implements the v0.0.1 minimal viable mesh:
 - `registry`  — event-sourced heartbeat ingestion + RegistrySnapshot
 - `select`    — mesh routing (extends slancha-api lmarena_selector pareto mode)
 
-Out of scope for v0.0.1 (see `mesh/README.md`): vLLM provisioning,
-libp2p discovery, idle fine-tune daemon, MCP wrapper integration.
+Out of scope for v0.0.1 (see `docs/SELF_ORGANIZING_LOOP_SCOPE.md`): vLLM
+provisioning, libp2p discovery, idle fine-tune daemon, MCP wrapper integration.
 """
 
 from mesh.models import (
