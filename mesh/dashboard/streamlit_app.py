@@ -34,7 +34,6 @@ from pathlib import Path
 
 from mesh.dashboard.cost import (
     MODEL_PRICING,
-    compute_actual_cost,
     cost_summary,
     estimated_field_explanation,
 )
@@ -356,7 +355,7 @@ def _render_operator(st, args) -> None:  # pragma: no cover — UI runtime
     st.subheader("Routing throughput")
     if decisions:
         # Build (ts, latency_ms, decision) buckets per minute
-        from collections import Counter, defaultdict
+        from collections import Counter
         per_minute = Counter()
         latencies = []
         decision_mix = Counter()

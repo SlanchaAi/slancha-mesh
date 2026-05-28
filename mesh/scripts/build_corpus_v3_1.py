@@ -58,7 +58,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from mesh.scripts.build_corpus_v3 import (
-    GatedDatasetError,
     signals_for,
 )
 
@@ -563,7 +562,6 @@ def supplement_undercount(
 
     extra: list[dict[str, Any]] = []
     log: dict[str, str] = {}
-    rng = random.Random(seed)
     idx = starting_idx
 
     for domain, count_needed in undercount.items():

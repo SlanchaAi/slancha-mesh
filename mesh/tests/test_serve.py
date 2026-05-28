@@ -7,7 +7,6 @@ test the daemon's contract against `NullBackend` only.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
 
 import pytest
 

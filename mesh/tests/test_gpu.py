@@ -4,10 +4,7 @@ cluster-wide placement (the v0.0.6 #46 deliverable)."""
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 

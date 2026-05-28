@@ -24,7 +24,6 @@ from mesh.registry import (
     AllocationEvent,
     HeartbeatPostRequest,
     MeshRegistry,
-    NODE_UNREACHABLE_AFTER,
 )
 from mesh.service import NODE_TOKEN_ENV, create_mesh_app
 from mesh.tests.conftest import make_heartbeat

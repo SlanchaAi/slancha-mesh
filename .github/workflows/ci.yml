@@ -37,6 +37,9 @@ jobs:
       - name: Install (locked — reproducible from uv.lock)
         run: uv sync --extra dev --frozen --python ${{ matrix.python-version }}
 
+      - name: Lint (ruff)
+        run: uv run --python ${{ matrix.python-version }} ruff check mesh/
+
       - name: Unit + integration tests
         run: uv run --python ${{ matrix.python-version }} pytest -q --tb=short
 

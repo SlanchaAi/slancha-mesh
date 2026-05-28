@@ -16,7 +16,6 @@ from mesh.allocator import (
     allocate_cluster,
     model_fit_score,
 )
-from mesh.catalog import load_catalog
 from mesh.models import NodeProbe, SpecialistCard
 
 

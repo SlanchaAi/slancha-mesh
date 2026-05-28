@@ -58,6 +58,12 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["mesh"]
 
+[tool.ruff]
+# Pin the parse target so the `ruff check mesh/` CI gate behaves the same
+# across ruff versions. Default lint rule set (pyflakes + a pycodestyle
+# subset) is kept deliberately — broadening `select` is a separate call.
+target-version = "py311"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["mesh/tests"]

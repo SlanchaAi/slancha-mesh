@@ -18,7 +18,6 @@ from mesh.models import LoadedModel, NodeHeartbeat, NodeProbe, NodeUtilization, 
 from mesh.registry import HeartbeatPostRequest, MeshRegistry
 from mesh.select import ClassifierSignals, select_mesh_route
 from mesh.serve import ServeDaemon, build_backend
-from mesh.tailnet import TailnetConfig
 
 
 def _probe() -> NodeProbe:

@@ -16,12 +16,9 @@ SLANCHA_NODE_TOKEN env (sent as Bearer).
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -80,7 +77,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"free={_fmt_gb(snap.mem_free_gb)} GB / "
         f"total={_fmt_gb((snap.mem_total_mib or 0)/1024 if snap.mem_total_mib else None)} GB"
     )
-    print(f"  procs (by GPU mem):")
+    print("  procs (by GPU mem):")
     if not snap.processes:
         print("    (none)")
     for p in sorted(snap.processes, key=lambda x: x.used_memory_mib, reverse=True):
@@ -91,7 +88,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"    pid {p.pid:>7d}  {user:<8s}  {p.used_memory_mib/1024:5.1f} GB  "
             f"{rt:>10s}  {cmd}"
         )
-    print(f"  reservations (cooperative, file-based):")
+    print("  reservations (cooperative, file-based):")
     active = store.list_active()
     if not active:
         print("    (none)")
@@ -207,7 +204,7 @@ def cmd_cluster_status(args: argparse.Namespace) -> int:
         if not nodes:
             print("registry has no nodes")
             return 0
-        print(f"# cluster status (no /gpu/cluster endpoint; falling back to /registry)")
+        print("# cluster status (no /gpu/cluster endpoint; falling back to /registry)")
         for nid, n in nodes.items():
             print(f"  {nid}  health={n.get('health')}  "
                   f"loaded={n.get('loaded_specialist_ids')}  "
@@ -248,7 +245,6 @@ def cmd_cluster_reserve(args: argparse.Namespace) -> int:
     if body is None:
         print("cluster view unavailable; cannot place", file=sys.stderr)
         return 2
-    heartbeats = list(body.get("nodes", {}).values())
     view = build_cluster_view_from_heartbeats(
         [{"node_id": nid, "gpu": n, "friendly_name": n.get("friendly_name")}
          for nid, n in body.get("nodes", {}).items()]

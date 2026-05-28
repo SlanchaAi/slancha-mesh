@@ -22,7 +22,6 @@ import json
 import signal
 import sys
 import threading
-import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path

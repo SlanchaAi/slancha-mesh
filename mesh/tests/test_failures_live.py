@@ -31,10 +31,8 @@ Why not iptables to simulate network partition? Two reasons:
 
 from __future__ import annotations
 
-import json
 import os
 import signal as _signal
-import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -47,7 +45,6 @@ from mesh.models import LoadedModel, NodeHeartbeat, NodeUtilization
 from mesh.probe import probe_node
 from mesh.registry import HeartbeatPostRequest, MeshRegistry
 from mesh.select import ClassifierSignals, select_mesh_route
-from mesh.serve import ServeDaemon
 
 LIVE_URL = os.environ.get("VLLM_LIVE_URL")
 LIVE_SPECIALIST = os.environ.get(

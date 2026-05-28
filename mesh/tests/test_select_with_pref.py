@@ -13,9 +13,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from mesh.models import (
-    HealthState,
-    MeshSelectionResult,
-    NodeBinding,
     NodeSummary,
     RegistrySnapshot,
     Route,

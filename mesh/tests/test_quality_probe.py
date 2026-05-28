@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -16,7 +14,6 @@ from mesh.quality_probe import (
     DriftEvent,
     LocalJudgeScorer,
     ProbeRunner,
-    QualityObservation,
     ScorerError,
     StubScorer,
     detect_drift,
