@@ -196,8 +196,16 @@ class ServeDaemon:
                 self._training_thread = None
                 try:
                     self.idle_detector.finish_training(now)
-                except RuntimeError:
-                    pass  # Race: state may have flipped; harmless.
+                except RuntimeError as exc:
+                    # A benign race (state flipped between the alive-check
+                    # above and here) is expected. But a persistent
+                    # RuntimeError would silently strand the detector in
+                    # TRAINING and starve every future pass — log it so a
+                    # stuck daemon is diagnosable instead of mute.
+                    self._log(
+                        f"[training] finish_training skipped "
+                        f"(state={self.idle_detector.state.value}): {exc}"
+                    )
 
             # Spawn training on READY_TO_TRAIN edge.
             if self.idle_detector.should_start_training() and self._training_enabled() and loaded:
@@ -334,7 +342,7 @@ class ServeDaemon:
     def _log(self, msg: str) -> None:
         if self.log_path:
             with self.log_path.open("a", encoding="utf-8") as f:
-                f.write(f"{datetime.now().isoformat()} {msg}\n")
+                f.write(f"{datetime.now(timezone.utc).isoformat()} {msg}\n")
         else:
             print(msg, flush=True)
 

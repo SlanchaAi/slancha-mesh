@@ -464,3 +464,21 @@ def test_get_models_requires_auth(monkeypatch):
     client = _make_client(monkeypatch, reg)
     resp = client.get("/models")
     assert resp.status_code in (401, 403)
+
+
+def test_main_returns_1_on_registry_fetch_failure(monkeypatch, caplog):
+    """The CLI is a cron/systemd-timer entry point — a registry fetch
+    failure must exit non-zero with a logged error, not a raw traceback."""
+    import logging
+    import urllib.error
+
+    from mesh.quality_probe import _main
+
+    def _boom(*a, **k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+    with caplog.at_level(logging.ERROR):
+        rc = _main(["--base-url", "http://registry.test", "--token", "t"])
+    assert rc == 1
+    assert any("failed to fetch registry" in r.message for r in caplog.records)

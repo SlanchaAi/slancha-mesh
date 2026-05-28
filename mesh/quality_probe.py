@@ -422,8 +422,15 @@ def _main(argv: list[str] | None = None) -> int:
         f"{args.base_url.rstrip('/')}/registry",
         headers={"Authorization": f"Bearer {args.token}"},
     )
-    with urllib.request.urlopen(req, timeout=30.0) as resp:  # noqa: S310
-        payload = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30.0) as resp:  # noqa: S310
+            payload = json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        # This is a cron/systemd-timer entry point; an unhandled traceback
+        # here is noise with no signal. The two helpers below (_send_chat,
+        # write_observation) already guard their network calls — match them.
+        logger.error("failed to fetch registry at %s: %s", args.base_url, exc)
+        return 1
 
     snapshot = payload.get("snapshot") or {}
     catalog = snapshot.get("catalog", {})

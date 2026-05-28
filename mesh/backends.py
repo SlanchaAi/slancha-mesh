@@ -187,14 +187,22 @@ class VLLMBackend:
             # See the project history.
             env.setdefault("VLLM_TEST_FORCE_FP8_MARLIN", "1")
 
-        log = open(self.log_path, "ab") if self.log_path else subprocess.DEVNULL
-        self._proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # so SIGTERM hits the whole group
-        )
+        log_file = open(self.log_path, "ab") if self.log_path else None
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=log_file or subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # so SIGTERM hits the whole group
+            )
+        finally:
+            # Popen dup'd the fd into the child; the parent's handle is no
+            # longer needed. Close it so we don't leak a descriptor per
+            # backend start — including the case where Popen raised (e.g.
+            # vllm not on PATH), where the handle would otherwise dangle.
+            if log_file is not None:
+                log_file.close()
 
     def wait_ready(self, timeout: float = 600.0) -> bool:
         """Poll /health until 200 or timeout. vLLM cold load is 2-4 min on Spark."""
