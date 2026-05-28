@@ -188,7 +188,7 @@ def render_summary_markdown(jsonl_path: Path) -> str:
     invocations = per_specialist_invocation_counts(records, include_cloud=True)
 
     lines: list[str] = []
-    lines.append(f"# Mesh Replay Summary")
+    lines.append("# Mesh Replay Summary")
     lines.append("")
     lines.append(f"Source: `{jsonl_path}`  ({stats['total']} decisions)")
     lines.append("")

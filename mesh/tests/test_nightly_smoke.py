@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from pathlib import Path
 
 from mesh.scripts.nightly_smoke import (
     DEFAULT_ALERT_THRESHOLD_PCT,

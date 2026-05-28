@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from mesh.dashboard.cost import (
-    BACKEND_TPS_OUT,
     DEFAULT_INPUT_TOKENS,
     MODEL_PRICING,
     Pricing,

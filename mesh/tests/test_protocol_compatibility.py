@@ -35,7 +35,6 @@ from mesh.models import (
     NetworkLink,
     NodeBinding,
     NodeHeartbeat,
-    NodeProbe,
     NodeSummary,
     NodeUtilization,
     RegistrySnapshot,

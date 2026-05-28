@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -260,7 +259,7 @@ def test_training_pass_no_preempt_event_runs_to_completion(tmp_path: Path):
         n_steps_planned=5,
         per_step_sleep_s=0,
     )
-    out = tp.run(preempt_event=None)
+    tp.run(preempt_event=None)
     assert tp.meta is not None
     assert tp.meta.preempted is False
     assert tp.meta.n_steps_completed == 5

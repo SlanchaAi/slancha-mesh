@@ -143,8 +143,10 @@ def estimate_tokens(record: DecisionRecord) -> tuple[int, int]:
     tps = BACKEND_TPS_OUT.get(picked)
     if tps is None:
         key = picked.lower()
-        if "coder" in key:    tps = BACKEND_TPS_OUT["qwen3-coder-30b"]
-        elif "8b"  in key:    tps = BACKEND_TPS_OUT["qwen3-8b"]
+        if "coder" in key:
+            tps = BACKEND_TPS_OUT["qwen3-coder-30b"]
+        elif "8b" in key:
+            tps = BACKEND_TPS_OUT["qwen3-8b"]
         elif "cloud" in key or "olmo" in key or "openrouter" in key:
             tps = BACKEND_TPS_OUT["cloud"]
         else:

@@ -294,7 +294,7 @@ def check_systemd_unit(unit: str) -> CheckResult:
         return CheckResult(
             id=f"systemd.{unit}",
             status="skip",
-            detail=f"non-Linux host; systemctl not applicable",
+            detail="non-Linux host; systemctl not applicable",
         )
     if not shutil.which("systemctl"):
         return CheckResult(
