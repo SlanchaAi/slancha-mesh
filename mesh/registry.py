@@ -37,6 +37,14 @@ from mesh.models import (
 # Spec §3.4: nodes unreachable >5 min are treated as left.
 NODE_UNREACHABLE_AFTER = timedelta(minutes=5)
 
+# Heartbeats arrive ~every 5s per node and otherwise accumulate without
+# bound. Once the log grows past this many events, a heartbeat append
+# triggers compaction (drop superseded heartbeats — see
+# MeshRegistry._compact_heartbeats). 10k ≈ a generous ceiling well above any
+# realistic node count, so compaction is rare and snapshot/allocator reads
+# stay O(retained), not O(all-heartbeats-ever).
+DEFAULT_MAX_EVENTS = 10_000
+
 
 # ---------------------------------------------------------------------------
 # Event types — event-sourced log
@@ -116,16 +124,27 @@ class RegistryGetResponse(BaseModel):
 
 
 class MeshRegistry:
-    """Append-only event log with snapshot replay.
+    """Event log with snapshot replay; superseded heartbeats are compacted.
 
     Not thread-safe; FastAPI handlers should wrap mutations in an
     asyncio.Lock or rely on uvicorn's single-worker mode in dev. The
     contract is intentionally narrow: ingest events, replay to build a
     snapshot. No mutation API beyond `record_heartbeat` / `record_node_left`.
+
+    The log is append-only except that, past `max_events`, a heartbeat
+    append drops heartbeats that have been superseded by a newer one for the
+    same node (`_compact_heartbeats`) — provably snapshot/allocator-preserving,
+    since both only read the latest heartbeat per node.
     """
 
-    def __init__(self, catalog: list[SpecialistCard] | None = None) -> None:
+    def __init__(
+        self,
+        catalog: list[SpecialistCard] | None = None,
+        *,
+        max_events: int = DEFAULT_MAX_EVENTS,
+    ) -> None:
         self._events: list[Event] = []
+        self._max_events = max_events
         # specialist_id -> SpecialistCard, used by the snapshot to enrich
         # NodeBindings with card metadata.
         self._catalog: dict[SpecialistId, SpecialistCard] = {
@@ -142,6 +161,8 @@ class MeshRegistry:
         self._events.append(
             HeartbeatEvent(ts=req.heartbeat.ts, node_url=req.node_url, heartbeat=req.heartbeat)
         )
+        if len(self._events) > self._max_events:
+            self._compact_heartbeats()
         return HeartbeatPostResponse(ack=True, next_due_seconds=5)
 
     def record_node_left(self, node_id: NodeId, reason: str = "graceful") -> None:
@@ -200,8 +221,36 @@ class MeshRegistry:
 
     @property
     def events(self) -> list[Event]:
-        """Read-only view of the append-only log (for tests + debugging)."""
+        """Read-only view of the event log (for tests + debugging).
+
+        Superseded heartbeats may have been dropped by compaction; the latest
+        heartbeat per node and all non-heartbeat events are always present.
+        """
         return list(self._events)
+
+    def _compact_heartbeats(self) -> None:
+        """Drop superseded heartbeats, keeping only the latest per node.
+
+        Heartbeats arrive ~every 5s per node and otherwise accumulate without
+        bound — and both readers (snapshot replay, run_allocator) grow O(n)
+        with the log. This is safe to do without changing any result: both
+        only ever use the *latest* heartbeat per node, and the snapshot's
+        node_left handling compares a node_left against that node's latest
+        heartbeat, never an older one. So removing any non-latest heartbeat
+        leaves both the snapshot and the allocator output unchanged. Rare
+        non-heartbeat events (node_left / allocation / quality_observation)
+        are retained in place.
+        """
+        latest_hb_idx: dict[NodeId, int] = {}
+        for i, ev in enumerate(self._events):
+            if isinstance(ev, HeartbeatEvent):
+                latest_hb_idx[ev.heartbeat.node_id] = i
+        keep = set(latest_hb_idx.values())
+        self._events = [
+            ev
+            for i, ev in enumerate(self._events)
+            if not isinstance(ev, HeartbeatEvent) or i in keep
+        ]
 
     def register_catalog(self, cards: list[SpecialistCard]) -> None:
         for c in cards:
