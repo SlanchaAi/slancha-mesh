@@ -450,7 +450,7 @@ def select_mesh_route_with_pref(
             {
                 "id": r.specialist_id,
                 "delta": round(winner_score - s, 4),
-                "losing_axes": sorted(deciding_axes - ax | ax),
+                "losing_axes": sorted(deciding_axes - ax),
             }
             for r, s, ax in losers
         ]

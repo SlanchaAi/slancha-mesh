@@ -254,6 +254,43 @@ def test_decision_reason_structured_has_required_keys():
     assert "losing_axes" in drs["alternatives_considered"][0]
 
 
+def test_losing_axes_is_the_axis_delta_not_the_full_set():
+    """`losing_axes` must report the axes that distinguish the winner from
+    this alternative — not every axis considered.
+
+    Regression-lock for a set-precedence bug: `deciding_axes - ax | ax`
+    parses as `(deciding_axes - ax) | ax`, which always equals
+    `deciding_axes | ax` (the full union), so every alternative reported
+    *all* axes regardless of where it actually differed.
+
+    Here the winner carries a `cost` axis (cost_estimate_cents > 0) that the
+    cheaper mesh-local runner-up lacks; quality dominates the rank so the
+    pricier route still wins. The only axis distinguishing them is `cost`,
+    so `losing_axes` must be exactly `["cost"]` — both `deciding - ax` and
+    the symmetric difference agree on that. The pre-fix bug emitted all
+    three axes (`["cost", "latency", "quality"]`).
+    """
+    snap = _make_snapshot(
+        {"general|medium": [
+            _route("winner", cost_cents=5.0),
+            _route("runner-up", node_id="spark-2", cost_cents=0.0),
+        ]},
+        {
+            "winner": _card("winner", quality_router_observed=4.8),
+            "runner-up": _card("runner-up", quality_router_observed=3.0),
+        },
+    )
+    pref = PrefVector(quality_weight=0.9)
+    result = select_mesh_route_with_pref(_signals(), snap, pref=pref)
+
+    drs = result.decision_reason_structured
+    assert drs is not None
+    assert drs["winner"] == "winner"
+    alt = drs["alternatives_considered"][0]
+    assert alt["id"] == "runner-up"
+    assert alt["losing_axes"] == ["cost"]
+
+
 def test_decision_reason_emits_preset_when_service_tier_set():
     snap = _make_snapshot(
         {"general|medium": [_route("only")]},
