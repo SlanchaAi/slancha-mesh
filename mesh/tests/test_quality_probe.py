@@ -153,6 +153,21 @@ def test_local_judge_scorer_raises_on_unparseable_reply(monkeypatch):
         scorer.score(DEFAULT_PROBE_SET[0], "x")
 
 
+def test_local_judge_scorer_raises_on_transport_error(monkeypatch):
+    """A connection failure must surface as ScorerError — not a silent 0 and
+    not an unhandled httpx exception — so the caller can distinguish 'scorer
+    broke' from 'specialist answered badly'. (The other tests stub a returned
+    response; none exercised the raise path.)"""
+
+    def _boom(url, json=None, headers=None, timeout=None):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "post", _boom)
+    scorer = LocalJudgeScorer(base_url="http://localhost:11434", model="judge")
+    with pytest.raises(ScorerError):
+        scorer.score(DEFAULT_PROBE_SET[0], "x")
+
+
 # ── ProbeRunner — uses an HTTP stub ─────────────────────────────────────────
 
 

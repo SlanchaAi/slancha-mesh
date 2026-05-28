@@ -6,11 +6,13 @@ import itertools
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from mesh.eval.holdout import write_holdout
 from mesh.eval.runner import (
     EndpointError,
+    HttpxEndpointDispatcher,
     append_pass,
     run_eval_pass,
 )
@@ -206,3 +208,59 @@ def test_eval_pass_row_omits_no_required_fields(tmp_path: Path):
         "elapsed_seconds",
     ):
         assert required in row, f"missing {required!r}"
+
+
+# ─── HttpxEndpointDispatcher — real HTTP dispatch error isolation ────────────
+# The runner's failure-isolation model (a raised EndpointError → one failed
+# prompt, not an aborted pass) depends on dispatch() raising EndpointError on
+# every fault. FakeDispatcher exercises the runner; these lock the real
+# dispatcher's four error branches + the success path, which had no coverage.
+
+
+class _FakeHttpResp:
+    def __init__(self, status_code: int, body: dict | None = None) -> None:
+        self.status_code = status_code
+        self._body = body if body is not None else {}
+
+    def json(self) -> dict:
+        return self._body
+
+
+def _dispatcher() -> HttpxEndpointDispatcher:
+    return HttpxEndpointDispatcher(base_url="http://ep.test", model="m")
+
+
+def test_httpx_dispatcher_happy_path(monkeypatch):
+    body = {"choices": [{"message": {"content": "hi"}}], "model": "served-x"}
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeHttpResp(200, body))
+    text, served = _dispatcher().dispatch("q", domain="general")
+    assert text == "hi"
+    assert served == "served-x"
+
+
+def test_httpx_dispatcher_transport_error_raises(monkeypatch):
+    def _boom(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "post", _boom)
+    with pytest.raises(EndpointError, match="request failed"):
+        _dispatcher().dispatch("q")
+
+
+def test_httpx_dispatcher_non_2xx_raises(monkeypatch):
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeHttpResp(500))
+    with pytest.raises(EndpointError, match="HTTP 500"):
+        _dispatcher().dispatch("q")
+
+
+def test_httpx_dispatcher_missing_content_raises(monkeypatch):
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeHttpResp(200, {"choices": []}))
+    with pytest.raises(EndpointError, match="missing assistant content"):
+        _dispatcher().dispatch("q")
+
+
+def test_httpx_dispatcher_content_not_str_raises(monkeypatch):
+    body = {"choices": [{"message": {"content": 123}}]}
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeHttpResp(200, body))
+    with pytest.raises(EndpointError, match="not text"):
+        _dispatcher().dispatch("q")
