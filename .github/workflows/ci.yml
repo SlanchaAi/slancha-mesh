@@ -1,0 +1,44 @@
+name: ci
+
+# Runs the full mesh test suite + catalog validation on every PR and on
+# pushes to main. Before this, the only workflow was cross-repo-schema-pin.yml,
+# which exercises two targeted files — the other ~580 tests (allocator,
+# registry, select, eval runner/gate/seed-verify, grading, quality probe,
+# service, dashboard, CLI) never ran in CI, so a PR could break any of them
+# and still merge green.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install (locked — reproducible from uv.lock)
+        run: uv sync --extra dev --frozen --python ${{ matrix.python-version }}
+
+      - name: Unit + integration tests
+        run: uv run --python ${{ matrix.python-version }} pytest -q --tb=short
+
+      - name: Validate catalog (substrate sanity)
+        run: uv run --python ${{ matrix.python-version }} python -m mesh.validate_card --strict
