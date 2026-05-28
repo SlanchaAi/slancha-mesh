@@ -112,3 +112,58 @@ def test_run_allocator_uses_latest_hardware(spark_node, catalog, fresh_now):
     assert spark_node.node_id in out
     # GB10 should fit something
     assert out[spark_node.node_id] is not None
+
+
+# ─── heartbeat-log compaction (unbounded-growth fix) ─────────────────────────
+
+
+def _spam_heartbeats(reg, spark_node, catalog, fresh_now, n: int):
+    for i in range(n):
+        hb = make_heartbeat(
+            spark_node,
+            fresh_now + timedelta(seconds=5 * i),
+            ["qwen3-math-7b-q4"],
+            catalog,
+            queue_depth=i,
+        )
+        reg.record_heartbeat(
+            HeartbeatPostRequest(heartbeat=hb, node_url="http://spark-1:8000/v1")
+        )
+
+
+def test_heartbeat_log_compacts_past_max_events(spark_node, catalog, fresh_now):
+    """Past max_events, superseded heartbeats are dropped — the log stays
+    bounded instead of growing one entry per 5s tick forever."""
+    reg = MeshRegistry(catalog=catalog, max_events=5)
+    _spam_heartbeats(reg, spark_node, catalog, fresh_now, n=40)
+    assert len(reg.events) <= 5  # not 40
+
+
+def test_compaction_preserves_latest_heartbeat(spark_node, catalog, fresh_now):
+    """Dropping older heartbeats must not change what the snapshot reports —
+    snapshot only reads the latest heartbeat per node."""
+    reg = MeshRegistry(catalog=catalog, max_events=5)
+    _spam_heartbeats(reg, spark_node, catalog, fresh_now, n=40)
+    snap = reg.snapshot(now=fresh_now + timedelta(seconds=5 * 40))
+    assert snap.nodes[spark_node.node_id].queue_depth == 39  # the latest tick
+    assert snap.nodes[spark_node.node_id].node_url == "http://spark-1:8000/v1"
+
+
+def test_compaction_preserves_node_left_drop(spark_node, catalog, fresh_now):
+    """A node_left after compaction still drops the node — the snapshot's
+    left-handling compares against the (retained) latest heartbeat."""
+    reg = MeshRegistry(catalog=catalog, max_events=3)
+    _spam_heartbeats(reg, spark_node, catalog, fresh_now, n=10)
+    reg.record_node_left(spark_node.node_id)
+    snap = reg.snapshot(now=fresh_now + timedelta(seconds=60))
+    assert spark_node.node_id not in snap.nodes
+
+
+def test_compaction_preserves_allocator(spark_node, catalog, fresh_now):
+    """run_allocator uses the latest heartbeat's hardware per node, which
+    compaction retains."""
+    reg = MeshRegistry(catalog=catalog, max_events=3)
+    _spam_heartbeats(reg, spark_node, catalog, fresh_now, n=10)
+    out = reg.run_allocator(strategy="tiered")
+    assert spark_node.node_id in out
+    assert out[spark_node.node_id] is not None
