@@ -51,7 +51,7 @@ the ACL is the credential. Contributor walkthrough: `NODE_SETUP.md`.
 | **`mesh/backends.py`** | **v0.0.2** | `BaseBackend` Protocol + `VLLMBackend` + `NullBackend` (spec §9) |
 | **`mesh/serve.py`** | **v0.0.2** | `ServeDaemon` boots backends, runs heartbeat loop |
 | **`mesh/scripts/bring-up-spark.sh`** | **v0.0.2** | One-command boot on a Spark |
-| `mesh/tests/` | v0.0.2 | 52 unit tests + live-vLLM integration suite (gated) |
+| `mesh/tests/` | v0.0.2 | 600+ unit tests + live-vLLM integration suite (gated) |
 
 ## How to run
 

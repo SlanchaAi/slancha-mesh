@@ -6,8 +6,7 @@ run on a Spark / Mac mini / RTX box; the same module is used by the
 in-process integration tests with `NullBackend`.
 
 CLI:
-    python -m mesh.serve --catalog mesh/catalog --port 8001 \
-        --specialist qwen3-coder-30b-a3b-fp8
+    python -m mesh.serve --base-port 8001 --specialist qwen3-coder-30b-a3b-fp8
 
 Programmatic:
     daemon = ServeDaemon(...); daemon.start(); daemon.run_forever()

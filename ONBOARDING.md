@@ -1,8 +1,8 @@
 # Onboarding a new specialist (or a new self-hoster)
 
 The v0.1 substrate is "drop a card → register → restart." This walk-through
-covers both cases — Paul adding a new specialist to his own mesh node,
-and someone-not-Paul standing up their first mesh node.
+covers both cases — an existing operator adding a new specialist to their
+own mesh node, and a new self-hoster standing up their first mesh node.
 
 ## Case A: new specialist on an existing mesh node
 
@@ -71,7 +71,7 @@ Total time: ~5 minutes once the model is loaded.
 
 ## Case B: standing up a new mesh node from scratch
 
-Imagine you're not Paul. You have a beefy local machine, you want to
+Say this is your first node. You have a beefy local machine, you want to
 join the mesh, and contribute a specialist. The substrate steps:
 
 > **Transport (2026-05-25):** nodes are reached **privately over a

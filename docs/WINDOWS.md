@@ -162,10 +162,10 @@ doc note._
   `tag:specialist`, the deny-by-default ACL (`tag:gateway → tag:specialist:8003,8004`)
   governs it in *both* directions: the push heartbeat, the registry's active
   health-probe, AND inference all collapse to `tag:gateway`-only. Smoking gun from
-  the live run: the node heartbeated fine into a dev registry on a `tag:paul-host`
+  the live run: the node heartbeated fine into a dev registry on a `tag:dev-laptop`
   laptop **while untagged**, then `last_seen` froze the instant `tag:specialist`
   propagated (heartbeat `20:14:58` vs tag-landing `20:17:30`) — the outbound
-  `specialist → paul-host:8088` POST is now ACL-denied too. **Implication:** a dev
+  `specialist → dev-laptop:8088` POST is now ACL-denied too. **Implication:** a dev
   registry on an untagged laptop only works pre-tag; in production the registry
   (the `SLANCHA_MESH_REGISTRY_URL` target) MUST run on a `tag:gateway` host (or be
   explicitly ACL-permitted), else every tagged specialist shows `unreachable` and
