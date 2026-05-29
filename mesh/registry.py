@@ -15,6 +15,7 @@ auth (spec §11 will add bearer tokens), libp2p replication.
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -126,10 +127,20 @@ class RegistryGetResponse(BaseModel):
 class MeshRegistry:
     """Event log with snapshot replay; superseded heartbeats are compacted.
 
-    Not thread-safe; FastAPI handlers should wrap mutations in an
-    asyncio.Lock or rely on uvicorn's single-worker mode in dev. The
-    contract is intentionally narrow: ingest events, replay to build a
-    snapshot. No mutation API beyond `record_heartbeat` / `record_node_left`.
+    Thread-safety: every public mutation (`record_heartbeat`,
+    `record_node_left`, `record_allocation`, `record_quality_observation`,
+    `register_catalog`) and every reader that walks `self._events`
+    (`snapshot`, `run_allocator`, `events`) is serialized by `self._lock`.
+    The lock is a `threading.RLock` because compaction is called from
+    inside `record_heartbeat` (re-entrant on the same thread).
+
+    Why a thread lock (not `asyncio.Lock`): the FastAPI handlers in
+    `mesh.registry_app` are *synchronous* `def`, so Starlette dispatches
+    them on its anyio threadpool. Even with a single uvicorn worker, two
+    `POST /heartbeat` calls hit `record_heartbeat` from different threads
+    at once, so an `asyncio.Lock` would be the wrong primitive (no event
+    loop is being shared between them) and a single-worker assumption is
+    insufficient to serialize writers.
 
     The log is append-only except that, past `max_events`, a heartbeat
     append drops heartbeats that have been superseded by a newer one for the
@@ -152,30 +163,36 @@ class MeshRegistry:
         }
         # node_id -> known node_url (last reported)
         self._node_urls: dict[NodeId, str] = {}
+        # Re-entrant: _compact_heartbeats is called from inside
+        # record_heartbeat, which already holds the lock.
+        self._lock = threading.RLock()
 
     # --- ingestion ---
 
     def record_heartbeat(self, req: HeartbeatPostRequest) -> HeartbeatPostResponse:
-        if req.node_url:
-            self._node_urls[req.heartbeat.node_id] = req.node_url
-        self._events.append(
-            HeartbeatEvent(ts=req.heartbeat.ts, node_url=req.node_url, heartbeat=req.heartbeat)
-        )
-        if len(self._events) > self._max_events:
-            self._compact_heartbeats()
-        return HeartbeatPostResponse(ack=True, next_due_seconds=5)
+        with self._lock:
+            if req.node_url:
+                self._node_urls[req.heartbeat.node_id] = req.node_url
+            self._events.append(
+                HeartbeatEvent(ts=req.heartbeat.ts, node_url=req.node_url, heartbeat=req.heartbeat)
+            )
+            if len(self._events) > self._max_events:
+                self._compact_heartbeats()
+            return HeartbeatPostResponse(ack=True, next_due_seconds=5)
 
     def record_node_left(self, node_id: NodeId, reason: str = "graceful") -> None:
-        self._events.append(
-            NodeLeftEvent(ts=datetime.now(timezone.utc), node_id=node_id, reason=reason)
-        )
+        with self._lock:
+            self._events.append(
+                NodeLeftEvent(ts=datetime.now(timezone.utc), node_id=node_id, reason=reason)
+            )
 
     def record_allocation(
         self, strategy: str, suggestions: dict[NodeId, SpecialistId | None]
     ) -> None:
-        self._events.append(
-            AllocationEvent(ts=datetime.now(timezone.utc), strategy=strategy, suggestions=suggestions)
-        )
+        with self._lock:
+            self._events.append(
+                AllocationEvent(ts=datetime.now(timezone.utc), strategy=strategy, suggestions=suggestions)
+            )
 
     def record_quality_observation(
         self,
@@ -204,20 +221,20 @@ class MeshRegistry:
             sample_count=sample_count,
             observation_source=observation_source,
         )
-        self._events.append(ev)
-
-        prior = None
-        old_card = self._catalog.get(specialist_id)
-        if old_card is not None:
-            prior = old_card.quality_router_observed
-            self._catalog[specialist_id] = old_card.model_copy(
-                update={
-                    "quality_router_observed": score,
-                    "quality_sample_count": (old_card.quality_sample_count or 0) + sample_count,
-                    "quality_observation_source": observation_source,
-                }
-            )
-        return prior, ev
+        with self._lock:
+            self._events.append(ev)
+            prior = None
+            old_card = self._catalog.get(specialist_id)
+            if old_card is not None:
+                prior = old_card.quality_router_observed
+                self._catalog[specialist_id] = old_card.model_copy(
+                    update={
+                        "quality_router_observed": score,
+                        "quality_sample_count": (old_card.quality_sample_count or 0) + sample_count,
+                        "quality_observation_source": observation_source,
+                    }
+                )
+            return prior, ev
 
     @property
     def events(self) -> list[Event]:
@@ -226,7 +243,8 @@ class MeshRegistry:
         Superseded heartbeats may have been dropped by compaction; the latest
         heartbeat per node and all non-heartbeat events are always present.
         """
-        return list(self._events)
+        with self._lock:
+            return list(self._events)
 
     def _compact_heartbeats(self) -> None:
         """Drop superseded heartbeats, keeping only the latest per node.
@@ -240,6 +258,10 @@ class MeshRegistry:
         leaves both the snapshot and the allocator output unchanged. Rare
         non-heartbeat events (node_left / allocation / quality_observation)
         are retained in place.
+
+        Caller must hold `self._lock` (the two passes — read indices, then
+        rebind — are not atomic on their own; a concurrent append between
+        them would otherwise be filtered out and silently lost).
         """
         latest_hb_idx: dict[NodeId, int] = {}
         for i, ev in enumerate(self._events):
@@ -253,8 +275,9 @@ class MeshRegistry:
         ]
 
     def register_catalog(self, cards: list[SpecialistCard]) -> None:
-        for c in cards:
-            self._catalog[c.specialist_id] = c
+        with self._lock:
+            for c in cards:
+                self._catalog[c.specialist_id] = c
 
     # --- snapshot construction ---
 
@@ -265,11 +288,19 @@ class MeshRegistry:
         per node_id. Nodes whose latest heartbeat is older than
         NODE_UNREACHABLE_AFTER are marked unreachable; nodes with a
         subsequent NodeLeftEvent are dropped entirely.
+
+        Held under `self._lock` so a concurrent compaction can't rebind
+        `self._events` mid-walk to a list with the just-acked beat
+        filtered out.
         """
         now = now or datetime.now(timezone.utc)
         latest: OrderedDict[NodeId, HeartbeatEvent] = OrderedDict()
         left: set[NodeId] = set()
-        for ev in self._events:
+        with self._lock:
+            events_snapshot = list(self._events)
+            catalog_snapshot = dict(self._catalog)
+            node_urls_snapshot = dict(self._node_urls)
+        for ev in events_snapshot:
             if isinstance(ev, HeartbeatEvent):
                 # A re-join after `node_left` clears the left flag.
                 left.discard(ev.heartbeat.node_id)
@@ -295,7 +326,7 @@ class MeshRegistry:
             # Node-level fallback URL (last-reported); per-specialist URLs
             # on each LoadedModel take precedence so a node serving several
             # specialists on distinct ports binds each to the right one.
-            node_url = ev.node_url or self._node_urls.get(node_id)
+            node_url = ev.node_url or node_urls_snapshot.get(node_id)
             nodes[node_id] = NodeSummary(
                 node_id=node_id,
                 friendly_name=hb.hardware.friendly_name,
@@ -317,7 +348,7 @@ class MeshRegistry:
                     last_seen=hb.ts,
                 )
                 specialists.setdefault(lm.specialist_id, []).append(binding)
-                card = self._catalog.get(lm.specialist_id)
+                card = catalog_snapshot.get(lm.specialist_id)
                 if card is not None:
                     coverage.setdefault(card.domain, []).append(node_id)
 
@@ -330,7 +361,7 @@ class MeshRegistry:
             specialists=specialists,
             coverage=coverage,
             ranked_routes={},
-            catalog=dict(self._catalog),
+            catalog=catalog_snapshot,
         )
 
     # --- ops: re-run allocator ---
@@ -344,13 +375,19 @@ class MeshRegistry:
 
         Returns a `{node_id: specialist_id | None}` map; persists an
         AllocationEvent so the event log stays the canonical source.
+
+        Reads `self._events` + `self._catalog` under `self._lock` to get
+        a consistent input view; the allocator itself (pure CPU on the
+        snapshot) runs without the lock, and `record_allocation` re-takes
+        the lock to append the resulting event.
         """
-        latest_hardware = {}
-        for ev in self._events:
-            if isinstance(ev, HeartbeatEvent):
-                latest_hardware[ev.heartbeat.node_id] = ev.heartbeat.hardware
-        nodes = list(latest_hardware.values())
-        catalog = list(self._catalog.values())
+        with self._lock:
+            latest_hardware = {}
+            for ev in self._events:
+                if isinstance(ev, HeartbeatEvent):
+                    latest_hardware[ev.heartbeat.node_id] = ev.heartbeat.hardware
+            nodes = list(latest_hardware.values())
+            catalog = list(self._catalog.values())
         suggestions = allocate_cluster(
             nodes=nodes, catalog=catalog, traffic_mix=traffic_mix, strategy=strategy  # type: ignore[arg-type]
         )
