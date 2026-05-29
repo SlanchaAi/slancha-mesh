@@ -20,13 +20,16 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from mesh.catalog import load_catalog
 from mesh.discovery import (
     DEFAULT_NODE_INFO_PORT,
+    DiscoveryResult,
     discover_specialists,
     make_http_fetch,
-    synthesize_lan_status,
     parse_specialist_peers,
+    synthesize_lan_status,
 )
+from mesh.router_app import _RefreshingSnapshot, create_router_app
 from mesh.tailnet import (
     DEFAULT_SPECIALIST_TAG,
     TailnetConfig,
@@ -368,6 +371,84 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# router — standalone OpenAI-compat proxy over a discovered mesh
+# ---------------------------------------------------------------------------
+
+
+def cmd_router(args: argparse.Namespace) -> int:
+    """Stand up the OpenAI-compat router endpoint.
+
+    Discovery is the snapshot source — re-walked every `--refresh-s`. The
+    flag pair mirrors `discover`: `--peer HOST` (repeatable) for raw-LAN,
+    nothing → Tailscale via `tailscale status`. Both → `--peer` wins.
+
+    A LocalLLaMA user runs `slancha-mesh router` on their laptop, points
+    Open WebUI / LiteLLM / their own client at `http://localhost:8080/v1`,
+    and the router handles which-node-to-call.
+    """
+    # Build the refresher closure: one call → DiscoveryResult.
+    token = args.token or os.environ.get(NODE_TOKEN_ENV) or None
+    fetch = make_http_fetch(token=token, timeout=args.timeout)
+    explicit_peers = list(args.peer)
+
+    def refresh() -> "DiscoveryResult":
+        if explicit_peers:
+            status = synthesize_lan_status(explicit_peers, specialist_tag=args.tag)
+            include_self = False
+        else:
+            status = tailnet_status(TailnetConfig(enabled=True))
+            if status is None:
+                # Refresh failures must not crash the loop — they yield an
+                # empty result, the router serves 404s until the operator
+                # fixes the tailnet / peers. _RefreshingSnapshot's loop
+                # wraps this; here we just return the empty shape.
+                return DiscoveryResult()
+            include_self = not args.exclude_self
+        return discover_specialists(
+            status,
+            fetch=fetch,
+            node_info_port=args.node_info_port,
+            specialist_tag=args.tag,
+            include_self=include_self,
+        )
+
+    # Local catalog provides `ollama_tag` for the upstream rewrite path.
+    cards = load_catalog()
+    holder = _RefreshingSnapshot(refresh, catalog=cards, refresh_s=args.refresh_s)
+    holder.start()
+
+    # Cold-start fetch so the first request after `uvicorn` boots doesn't
+    # see an empty snapshot. (start() also kicks one, but races with the
+    # serve thread; the explicit get() makes the ordering obvious.)
+    try:
+        holder.get()
+    except Exception as exc:  # noqa: BLE001 — keep the router up even if first discover fails
+        _print(f"[router] initial discovery failed (will retry every "
+               f"{args.refresh_s}s): {exc}")
+
+    app = create_router_app(snapshot_source=holder.get)
+
+    _print(f"[router] starting on http://{args.bind}:{args.port}  "
+           f"(refresh={args.refresh_s}s, peers={len(explicit_peers) or 'tailnet'}, "
+           f"auth={'on' if token or os.environ.get(NODE_TOKEN_ENV) else 'off'})")
+
+    try:
+        import uvicorn  # local import: keeps `slancha-mesh --help` fast
+    except ImportError:
+        _print("[router] `uvicorn` is not installed. "
+               "Reinstall with `uv pip install -e \".[dev]\"` or "
+               "`pip install uvicorn fastapi` and try again.")
+        holder.stop()
+        return 1
+
+    try:
+        uvicorn.run(app, host=args.bind, port=args.port, log_level=args.log_level)
+    finally:
+        holder.stop()
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -445,6 +526,39 @@ def build_parser() -> argparse.ArgumentParser:
     sv = sub.add_parser("serve", help="Daemon-only serve (dev/non-tailnet); passthrough to `python -m mesh.serve`.")
     sv.add_argument("rest", nargs=argparse.REMAINDER, help="Args forwarded to mesh.serve.")
     sv.set_defaults(func=cmd_serve)
+
+    # router — standalone OpenAI-compat proxy over a discovered mesh
+    rt = sub.add_parser(
+        "router",
+        help=(
+            "Run an OpenAI-compatible `/v1` endpoint over a discovered mesh. "
+            "Point Open WebUI / LiteLLM / your client at it; one URL routes "
+            "across every reachable specialist."
+        ),
+    )
+    rt.add_argument("--bind", default="127.0.0.1",
+                    help="Router bind host (default 127.0.0.1; set to 0.0.0.0 for LAN).")
+    rt.add_argument("--port", type=int, default=8080,
+                    help="Router bind port (default 8080; deliberately != registry :8088).")
+    rt.add_argument("--peer", action="append", default=[], metavar="HOST",
+                    help="Explicit peer host for raw-LAN discovery (repeatable). "
+                         "Else uses `tailscale status`.")
+    rt.add_argument("--node-info-port", type=int, default=DEFAULT_NODE_INFO_PORT,
+                    help="Each peer's /models port (default mesh convention).")
+    rt.add_argument("--tag", default=DEFAULT_SPECIALIST_TAG,
+                    help="Tailnet tag to enumerate when not using --peer.")
+    rt.add_argument("--token", default=None,
+                    help=f"Bearer token for peer fetches (else ${NODE_TOKEN_ENV}).")
+    rt.add_argument("--timeout", type=float, default=4.0,
+                    help="Per-peer fetch timeout during each discovery pass.")
+    rt.add_argument("--exclude-self", action="store_true",
+                    help="Skip the local node in tailnet-discover mode.")
+    rt.add_argument("--refresh-s", type=float, default=5.0,
+                    help="Discovery refresh cadence in seconds (default 5, matches heartbeat).")
+    rt.add_argument("--log-level", default="info",
+                    choices=["critical", "error", "warning", "info", "debug", "trace"],
+                    help="uvicorn log level.")
+    rt.set_defaults(func=cmd_router)
 
     return ap
 

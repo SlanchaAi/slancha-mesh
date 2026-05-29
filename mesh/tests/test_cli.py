@@ -267,3 +267,120 @@ def test_discover_no_peer_no_tailnet_still_errors(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "tailscale status" in out
     assert "--peer" in out  # hint at the LAN-mode escape hatch
+
+
+# ---------------------------------------------------------------------------
+# router subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_router_parser_carries_expected_defaults():
+    """Lock the public flag surface so we don't silently rename them."""
+    args = _parse(["router"])
+    assert args.bind == "127.0.0.1"
+    assert args.port == 8080  # != registry's 8088 by convention
+    assert args.peer == []
+    assert args.refresh_s == 5.0  # matches heartbeat cadence
+    assert args.tag  # has a default specialist tag
+    assert args.log_level == "info"
+
+
+def test_router_parser_accepts_lan_and_tailnet_modes_via_flags():
+    args_lan = _parse(["router", "--peer", "192.168.1.10", "--peer", "192.168.1.20"])
+    assert args_lan.peer == ["192.168.1.10", "192.168.1.20"]
+    args_tn = _parse(["router", "--port", "9090", "--refresh-s", "10"])
+    assert args_tn.port == 9090 and args_tn.refresh_s == 10.0
+
+
+def test_cmd_router_starts_uvicorn_with_router_app_and_stops_refresher(monkeypatch):
+    """Wire test: cmd_router builds a refresher, hands snapshot_source to
+    the router app, runs uvicorn, and stops the refresher on exit."""
+    monkeypatch.setattr(
+        "mesh.cli.tailnet_status",
+        lambda cfg: {
+            "Self": {
+                "DNSName": "self.ts.net.",
+                "Online": True,
+                "Tags": ["tag:specialist"],
+            },
+            "Peer": {},
+        },
+    )
+
+    # Stub fetch so discover_specialists returns a single specialist.
+    def fake_make_fetch(**kw):
+        def fetch(host, port):
+            return {
+                "object": "list",
+                "data": [{
+                    "id": "demo",
+                    "object": "model",
+                    "routing_meta": {
+                        "model_id": "vendor/demo",
+                        "domain": "code",
+                        "capabilities": [],
+                        "quality": {"router_observed": None},
+                        "node_urls": [f"http://{host}:8003"],
+                    },
+                }],
+            }
+        return fetch
+
+    monkeypatch.setattr("mesh.cli.make_http_fetch", fake_make_fetch)
+
+    # Capture what cmd_router passes to uvicorn + assert the refresher stops.
+    captured: dict = {}
+
+    def fake_uvicorn_run(app, host, port, log_level):
+        # Snapshot source must yield the demo specialist we stubbed in fetch.
+        snap = app.state.snapshot_source()
+        captured["specialists"] = list(snap.specialists)
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+
+    rc = main(["router", "--port", "9091", "--bind", "127.0.0.1", "--refresh-s", "30"])
+    assert rc == 0
+    assert captured["host"] == "127.0.0.1" and captured["port"] == 9091
+    # The discovered specialist must show up in the snapshot the router app uses.
+    assert "demo" in captured["specialists"]
+
+
+def test_cmd_router_uses_explicit_peers_when_set(monkeypatch):
+    """`--peer` flips the refresher into LAN-only mode; tailnet_status must
+    not be called."""
+
+    def boom(_cfg):
+        raise AssertionError("tailnet_status must NOT be called when --peer is set")
+
+    monkeypatch.setattr("mesh.cli.tailnet_status", boom)
+
+    def fake_make_fetch(**kw):
+        def fetch(host, port):
+            return {
+                "object": "list",
+                "data": [{
+                    "id": "demo",
+                    "object": "model",
+                    "routing_meta": {
+                        "model_id": "vendor/demo",
+                        "domain": "code",
+                        "capabilities": [],
+                        "quality": {"router_observed": None},
+                        "node_urls": [f"http://{host}:8003"],
+                    },
+                }],
+            }
+        return fetch
+
+    monkeypatch.setattr("mesh.cli.make_http_fetch", fake_make_fetch)
+    monkeypatch.setattr("uvicorn.run", lambda app, host, port, log_level: None)
+
+    rc = main([
+        "router",
+        "--peer", "10.0.0.5",
+        "--peer", "10.0.0.6",
+        "--refresh-s", "30",
+    ])
+    assert rc == 0

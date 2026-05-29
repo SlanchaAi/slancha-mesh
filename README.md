@@ -40,8 +40,23 @@ slancha-mesh discover --peer 127.0.0.1
 That's the whole thing on a single box. `discover --peer 127.0.0.1` reads
 the local node-info, skips Tailscale entirely, and shows the node as
 `reachable=1` with the specialist bound to your Ollama daemon's URL.
-Point any OpenAI-compatible client (Open WebUI, LiteLLM, your `curl`) at
-the discovered `node_url` and you'll get completions back.
+
+Point any OpenAI-compatible client (Open WebUI, LiteLLM, your `curl`)
+at the discovered `node_url` directly — OR run the standalone router
+proxy and point clients at one URL across every reachable specialist:
+
+```bash
+# In a third terminal: a drop-in OpenAI /v1 endpoint over your mesh
+slancha-mesh router --peer 127.0.0.1 --port 8080
+
+# Then from anywhere — same shape as api.openai.com /v1
+curl -s http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen2.5-coder-7b-q4-ollama",
+    "messages": [{"role":"user","content":"reverse a string in python"}]
+  }' | jq -r '.choices[0].message.content'
+```
 
 ## 5-minute quickstart (two boxes, LAN, still no Tailscale)
 
