@@ -244,3 +244,22 @@ def test_default_registry_isolated(monkeypatch, spark_node, catalog, fresh_now):
 
     resp_b = client_b.get("/registry")
     assert resp_b.json()["snapshot"]["nodes"] == {}
+
+
+# ---------------------------------------------------------------------------
+# POST /gpu/reserve — malformed body validation (400, not a 500 traceback)
+# ---------------------------------------------------------------------------
+
+
+def test_gpu_reserve_rejects_non_numeric_gb(monkeypatch):
+    # `gb_requested: "lots"` previously hit float() → uncaught ValueError → 500.
+    client = _new_client(monkeypatch)
+    resp = client.post("/gpu/reserve", json={"gb_requested": "lots"})
+    assert resp.status_code == 400
+
+
+def test_gpu_reserve_rejects_null_gb(monkeypatch):
+    # Explicit null → float(None) → TypeError → 500 before the fix.
+    client = _new_client(monkeypatch)
+    resp = client.post("/gpu/reserve", json={"gb_requested": None})
+    assert resp.status_code == 400

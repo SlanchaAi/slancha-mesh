@@ -486,7 +486,12 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
                 }
         view = build_cluster_view_from_heartbeats(list(latest.values()))
 
-        gb = float(body.get("gb_requested", 0))
+        try:
+            gb = float(body.get("gb_requested", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="gb_requested must be a number"
+            ) from None
         if gb <= 0:
             raise HTTPException(status_code=400, detail="gb_requested must be > 0")
 
