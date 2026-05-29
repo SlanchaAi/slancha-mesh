@@ -53,6 +53,31 @@ def test_parse_vllm_metrics_missing_gauges_returns_zeros():
     assert out == {"queue_depth": 0, "running": 0, "gpu_cache_pct": 0.0}
 
 
+def test_parse_vllm_metrics_malformed_value_does_not_raise():
+    """A non-numeric / truncated gauge value yields the default, never raises.
+
+    The queue_depth / running branches previously did an unguarded
+    int(float(...)), so a value drift or a truncated /metrics body raised
+    ValueError up through utilization() into the heartbeat path.
+    """
+    body = (
+        'vllm:num_requests_waiting{model_name="m"} notanumber\n'
+        'vllm:num_requests_running{model_name="m"} \n'  # truncated: no value
+    )
+    out = _parse_vllm_metrics(body)  # must not raise
+    assert out == {"queue_depth": 0, "running": 0, "gpu_cache_pct": 0.0}
+
+
+def test_parse_vllm_metrics_keeps_valid_when_one_value_malformed():
+    body = (
+        'vllm:num_requests_waiting{model_name="m"} 5.0\n'
+        'vllm:num_requests_running{model_name="m"} bogus\n'
+    )
+    out = _parse_vllm_metrics(body)
+    assert out["queue_depth"] == 5  # valid gauge still parsed
+    assert out["running"] == 0  # malformed one falls back to default
+
+
 def test_vllm_backend_base_url_and_health_url():
     be = VLLMBackend(card=_card(), host="127.0.0.1", port=8123)
     assert be.base_url == "http://127.0.0.1:8123"

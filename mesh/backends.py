@@ -289,26 +289,44 @@ class VLLMBackend:
                 return False
 
 
+def _trailing_float(line: str) -> float | None:
+    """Last whitespace-delimited token of a Prometheus line, as a float.
+
+    Returns None when it isn't numeric. vLLM metric line formats drift across
+    versions (extra labels, exemplars, a truncated body); this parser must
+    fall back to defaults, never raise into the heartbeat path.
+    """
+    try:
+        return float(line.rsplit(" ", 1)[-1])
+    except (ValueError, IndexError):
+        return None
+
+
 def _parse_vllm_metrics(body: str) -> dict:
     """Pull the handful of vLLM Prometheus gauges we care about.
 
     Robust to missing/renamed metrics across vLLM versions: returns 0 if
-    the gauge isn't present rather than failing the heartbeat.
+    the gauge isn't present (or its value is unparseable) rather than failing
+    the heartbeat.
     """
     out = {"queue_depth": 0, "running": 0, "gpu_cache_pct": 0.0}
     for line in body.splitlines():
         if line.startswith("#") or not line.strip():
             continue
-        # `vllm:num_requests_waiting{...} 3.0`
+        # `vllm:num_requests_waiting{...} 3.0` — a malformed value yields the
+        # default rather than raising (all three gauges handled uniformly).
         if "vllm:num_requests_waiting" in line:
-            out["queue_depth"] = int(float(line.rsplit(" ", 1)[-1]))
+            v = _trailing_float(line)
+            if v is not None:
+                out["queue_depth"] = int(v)
         elif "vllm:num_requests_running" in line:
-            out["running"] = int(float(line.rsplit(" ", 1)[-1]))
+            v = _trailing_float(line)
+            if v is not None:
+                out["running"] = int(v)
         elif "vllm:gpu_cache_usage_perc" in line:
-            try:
-                out["gpu_cache_pct"] = float(line.rsplit(" ", 1)[-1])
-            except ValueError:
-                pass
+            v = _trailing_float(line)
+            if v is not None:
+                out["gpu_cache_pct"] = v
     return out
 
 
