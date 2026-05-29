@@ -108,10 +108,12 @@ def _snapshot(
 
 
 def _client(snapshot: RegistrySnapshot, handler) -> TestClient:
-    """Build a TestClient over a router app whose http_client is a MockTransport.
+    """Build a TestClient over a router app whose http_client is an AsyncMockTransport.
 
-    `handler` is called per upstream request and returns a tuple
-    `(status_code, json_dict | bytes, headers | None)`.
+    `handler` is called per upstream request and returns either:
+      - a tuple `(status_code, json_dict | bytes, headers | None)`, or
+      - a fully-formed `httpx.Response` (e.g. with `stream=` for SSE), or
+      - it raises (transport failure path).
     """
 
     def transport_handler(request: httpx.Request) -> httpx.Response:
@@ -123,7 +125,7 @@ def _client(snapshot: RegistrySnapshot, handler) -> TestClient:
             return httpx.Response(status_code, json=payload, headers=headers or {})
         return httpx.Response(status_code, content=payload, headers=headers or {})
 
-    upstream = httpx.Client(transport=httpx.MockTransport(transport_handler))
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(transport_handler))
     app = create_router_app(snapshot_source=lambda: snapshot, http_client=upstream)
     return TestClient(app)
 
@@ -445,9 +447,13 @@ def test_chat_completions_400_when_body_not_json():
     assert r.status_code == 400
 
 
-def test_chat_completions_501_on_stream_true_until_streaming_lands():
-    """Phase-1 explicitly refuses `stream: true` — silent buffering would
-    violate the OpenAI contract and break clients that expect SSE."""
+def test_chat_completions_stream_true_passes_through_sse_chunks():
+    """Phase-2 contract: `stream: true` is now SSE passthrough.
+
+    Upstream emits a sequence of `data: {...}\\n\\n` lines; the router
+    must forward them byte-for-byte with `text/event-stream` so OpenAI
+    clients (Open WebUI, LiteLLM streaming, raw SDK with stream=True)
+    work without a separate client config."""
     snap = _snapshot(
         cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
         bindings={
@@ -456,7 +462,51 @@ def test_chat_completions_501_on_stream_true_until_streaming_lands():
             ]
         },
     )
-    client = _client(snap, lambda req: (200, {}, None))
+    sse_body = (
+        b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+        b'data: [DONE]\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = _client(snap, handler)
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "qwen2.5-coder-7b-q4-ollama",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    # Routing-audit headers are still set on the streaming response.
+    assert r.headers["X-Slancha-Specialist"] == "qwen2.5-coder-7b-q4-ollama"
+    # Body bytes pass through unchanged — `[DONE]` marker included.
+    assert r.content == sse_body
+
+
+def test_chat_completions_stream_502_on_upstream_connect_failure():
+    """Streaming connect failure → same 502 contract as the non-streaming path."""
+    snap = _snapshot(
+        cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+        bindings={
+            "qwen2.5-coder-7b-q4-ollama": [
+                _binding(specialist_id="qwen2.5-coder-7b-q4-ollama")
+            ]
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    client = _client(snap, handler)
     r = client.post(
         "/v1/chat/completions",
         json={
@@ -465,7 +515,51 @@ def test_chat_completions_501_on_stream_true_until_streaming_lands():
             "stream": True,
         },
     )
-    assert r.status_code == 501
+    assert r.status_code == 502
+    assert "unreachable" in r.json()["detail"]
+
+
+def test_chat_completions_stream_rewrites_model_for_ollama_upstream():
+    """`ollama_tag` rewrite applies on the streaming path too — otherwise
+    Ollama 404s the specialist id."""
+    snap = _snapshot(
+        cards=[
+            _card(
+                specialist_id="qwen2.5-coder-7b-q4-ollama",
+                required_backend="ollama",
+                ollama_tag="qwen2.5-coder:7b-instruct-q4_K_M",
+            )
+        ],
+        bindings={
+            "qwen2.5-coder-7b-q4-ollama": [
+                _binding(specialist_id="qwen2.5-coder-7b-q4-ollama")
+            ]
+        },
+    )
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.read()
+        return httpx.Response(
+            200,
+            content=b'data: [DONE]\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = _client(snap, handler)
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "qwen2.5-coder-7b-q4-ollama",
+            "messages": [],
+            "stream": True,
+        },
+    )
+    assert r.status_code == 200
+    import json as _json
+    body = _json.loads(captured["body"])
+    assert body["model"] == "qwen2.5-coder:7b-instruct-q4_K_M"
+    assert body["stream"] is True  # the stream flag itself must pass through
 
 
 # ---------------------------------------------------------------------------

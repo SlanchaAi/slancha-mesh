@@ -59,7 +59,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from mesh.discovery import DiscoveryResult
 from mesh.models import NodeBinding, NodeSummary, RegistrySnapshot, SpecialistCard
@@ -67,6 +67,10 @@ from mesh.registry import MeshRegistry
 
 NODE_TOKEN_ENV = "SLANCHA_NODE_TOKEN"
 UPSTREAM_TIMEOUT_S = 120.0  # generous; covers a cold Ollama load on the upstream
+# Streaming completions can run for minutes (long generations, slow models on
+# small hardware). Tight first-byte / connect deadlines, but no overall read
+# cap — the proxy stays open as long as the upstream emits chunks.
+DEFAULT_STREAMING_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
 
 _log = logging.getLogger(__name__)
 
@@ -327,6 +331,78 @@ class _RefreshingSnapshot:
 
 
 # ---------------------------------------------------------------------------
+# Streaming proxy — SSE passthrough
+# ---------------------------------------------------------------------------
+
+
+async def _proxy_stream(
+    client: httpx.AsyncClient,
+    *,
+    upstream_url: str,
+    upstream_body: dict,
+    authorization: str | None,
+    slancha_headers: dict[str, str],
+) -> StreamingResponse:
+    """Open a streaming request to the upstream, forward bytes as they arrive.
+
+    OpenAI's chat completions SSE format is a sequence of
+    `data: {...}\\n\\n` lines terminated by `data: [DONE]\\n\\n`. Both
+    vLLM and Ollama emit it natively; we pass bytes through unchanged
+    so the upstream's chunk shape is what reaches the client.
+
+    Upstream failures map to:
+      - connect / pre-headers errors → 502 BAD GATEWAY (HTTPException),
+        same as the non-streaming path; FastAPI emits the JSON detail.
+      - mid-stream disconnect → the generator raises out, the chunked
+        response closes early. Most clients tolerate this as
+        end-of-message; we deliberately do NOT inject a synthesized
+        `[DONE]` because doing so could mask a real upstream truncation.
+
+    The upstream's `Content-Type` (typically `text/event-stream`) is
+    preserved; cache-control hints typical of SSE are not synthesized —
+    we forward whatever the upstream sent.
+    """
+    try:
+        # `client.stream(...)` is an async context manager around the
+        # request; we keep it alive for the duration of the generator
+        # so the connection stays open while we forward chunks.
+        stream_ctx = client.stream(
+            "POST",
+            upstream_url,
+            json=upstream_body,
+            headers=_upstream_headers(authorization),
+        )
+        response = await stream_ctx.__aenter__()
+    except (httpx.HTTPError, OSError) as exc:
+        _log.warning("[router] upstream stream %s unreachable: %s", upstream_url, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"upstream unreachable at {upstream_url}: "
+                f"{exc.__class__.__name__}"
+            ),
+        ) from exc
+
+    media_type = response.headers.get("content-type", "text/event-stream")
+    upstream_status = response.status_code
+
+    async def gen():
+        try:
+            async for chunk in response.aiter_bytes():
+                if chunk:
+                    yield chunk
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+
+    return StreamingResponse(
+        gen(),
+        status_code=upstream_status,
+        media_type=media_type,
+        headers=slancha_headers,
+    )
+
+
+# ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
@@ -335,7 +411,7 @@ def create_router_app(
     registry: MeshRegistry | None = None,
     *,
     snapshot_source: SnapshotSource | None = None,
-    http_client: httpx.Client | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """Build the OpenAI-compatible router app.
 
@@ -347,9 +423,17 @@ def create_router_app(
       - Both None → `ValueError`. The router needs *some* way to know
         what's reachable.
 
-    `http_client` is injected for tests so we don't open real sockets;
-    production passes None and the factory creates a long-lived
-    `httpx.Client` with the upstream timeout pre-set.
+    `http_client` is the `httpx.AsyncClient` used for upstream calls.
+    Tests inject one wired to `httpx.MockTransport` so no real socket is
+    opened. Production passes `None` and the factory builds one with the
+    streaming-friendly timeout policy (tight connect/write, no overall
+    read cap — a long generation may take minutes).
+
+    Async throughout because (a) handlers can `await client.post()` /
+    `async with client.stream(...)` without blocking the event loop —
+    the previous sync `Client` inside `async def` serialized outbound
+    requests — and (b) SSE passthrough needs an async iterator into
+    `StreamingResponse` anyway.
     """
     if snapshot_source is None and registry is None:
         raise ValueError(
@@ -363,7 +447,7 @@ def create_router_app(
         # registry is guaranteed non-None here by the ValueError above.
         return registry.snapshot()  # type: ignore[union-attr]
 
-    client = http_client or httpx.Client(timeout=UPSTREAM_TIMEOUT_S)
+    client = http_client or httpx.AsyncClient(timeout=DEFAULT_STREAMING_TIMEOUT)
 
     app = FastAPI(
         title="Slancha-Mesh OpenAI-compatible router",
@@ -422,14 +506,6 @@ def create_router_app(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="`model` must be a non-empty specialist_id",
             )
-        # Phase-1 deliberately rejects streaming so a client doesn't get a
-        # silently-buffered response that violates the OpenAI contract.
-        # Followup PR proxies the SSE stream.
-        if body.get("stream") is True:
-            raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail="streaming responses are not yet supported by the mesh router",
-            )
 
         snap = _snapshot()
         binding = _pick_binding(specialist_id, snap)
@@ -444,9 +520,26 @@ def create_router_app(
 
         upstream_url = f"{binding.node_url.rstrip('/')}/v1/chat/completions"
         upstream_body = _rewrite_model_for_upstream(body, specialist_id, snap)
+        slancha_headers = {
+            "X-Slancha-Specialist": specialist_id,
+            "X-Slancha-Node": binding.node_id,
+            "X-Slancha-Reason": (
+                f"primary; queue_depth={binding.queue_depth} "
+                f"p95={binding.p95_latency_ms_60s}"
+            ),
+        }
+
+        if body.get("stream") is True:
+            return await _proxy_stream(
+                client,
+                upstream_url=upstream_url,
+                upstream_body=upstream_body,
+                authorization=authorization,
+                slancha_headers=slancha_headers,
+            )
 
         try:
-            upstream = client.post(
+            upstream = await client.post(
                 upstream_url,
                 json=upstream_body,
                 headers=_upstream_headers(authorization),
@@ -469,14 +562,6 @@ def create_router_app(
         # Forward the upstream body byte-for-byte; we touch only the headers
         # the OpenAI spec lets us own + add our routing-audit headers.
         media_type = upstream.headers.get("content-type", "application/json")
-        slancha_headers = {
-            "X-Slancha-Specialist": specialist_id,
-            "X-Slancha-Node": binding.node_id,
-            "X-Slancha-Reason": (
-                f"primary; queue_depth={binding.queue_depth} "
-                f"p95={binding.p95_latency_ms_60s}"
-            ),
-        }
         return Response(
             content=upstream.content,
             status_code=upstream.status_code,
