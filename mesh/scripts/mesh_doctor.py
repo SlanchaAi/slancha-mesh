@@ -37,7 +37,7 @@ import socket
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
-from typing import Literal
+from typing import Callable, Literal
 
 
 CheckStatus = Literal["pass", "warn", "fail", "skip"]
@@ -328,14 +328,18 @@ def check_systemd_unit(unit: str) -> CheckResult:
     )
 
 
-def check_port_listener(port: int) -> CheckResult:
-    """Is port bound locally? Useful for collision detection on 8088."""
+def _port_has_listener(port: int) -> bool:
+    """True if something is accepting connections on 127.0.0.1:{port}."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        result = sock.connect_ex(("127.0.0.1", port))
+        return sock.connect_ex(("127.0.0.1", port)) == 0
     finally:
         sock.close()
-    if result == 0:
+
+
+def check_port_listener(port: int) -> CheckResult:
+    """Is port bound locally? Useful for collision detection on 8088."""
+    if _port_has_listener(port):
         return CheckResult(
             id=f"ports.{port}",
             status="pass",
@@ -477,12 +481,67 @@ def check_router_reachable() -> CheckResult:
     )
 
 
+# Common model-server ports OUTSIDE the gateway ACL accept-set. A node that
+# serves here (slancha-local's :8000 default, a vLLM dev :8001) heartbeats +
+# registers fine but is un-routable — the gateway is not permitted to dial it.
+OFF_ACL_MODEL_PORTS = (8000, 8001)
+
+
+def check_model_port_acl_reachable(
+    is_listening: Callable[[int], bool] | None = None,
+) -> CheckResult:
+    """Is a served model port inside the gateway ACL accept-set?
+
+    The tailnet ACL only opens the convention model ports
+    (`tag:gateway -> tag:specialist:8003,8004` — `mesh.tailnet.DEFAULT_MODEL_PORTS`).
+    A node serving OUTSIDE that set (e.g. slancha-local's :8000 default)
+    registers + heartbeats fine but is **un-routable**: the gateway is not
+    permitted to dial it (slancha-mesh#8, Windows dogfood). This turns that
+    silent failure into a loud, actionable warning.
+
+    Detection mirrors `check_port_listener` (loopback connect) and is advisory:
+    it only warns on a *positive* off-ACL listener, so a node serving on the
+    tailnet interface alone degrades to `skip`, never a false alarm.
+    """
+    from mesh.tailnet import DEFAULT_MODEL_PORTS
+
+    if is_listening is None:
+        is_listening = _port_has_listener
+    acl_ports = sorted(set(DEFAULT_MODEL_PORTS.values()))
+    on_acl = [p for p in acl_ports if is_listening(p)]
+    if on_acl:
+        return CheckResult(
+            id="ports.model_acl", status="pass",
+            detail=f"serving on ACL model port(s) {on_acl} — gateway-routable",
+        )
+    on_off = [p for p in OFF_ACL_MODEL_PORTS if is_listening(p)]
+    if on_off:
+        acl_str = ",".join(str(p) for p in acl_ports)
+        return CheckResult(
+            id="ports.model_acl", status="warn",
+            detail=(
+                f"model server on {on_off} but nothing on the ACL accept-set "
+                f"{acl_ports} — the gateway ACL (tag:gateway -> "
+                f"tag:specialist:{acl_str}) cannot reach this node"
+            ),
+            fix=f"re-serve on a convention model port: `slancha-mesh up --base-port {acl_ports[0]}`",
+        )
+    return CheckResult(
+        id="ports.model_acl", status="skip",
+        detail=(
+            f"no model server detected on the ACL set {acl_ports} or common "
+            f"off-ACL ports {list(OFF_ACL_MODEL_PORTS)}"
+        ),
+    )
+
+
 def run_node_doctor(node_info_port: int = NODE_INFO_PORT) -> DoctorReport:
     """Pull/tailnet-model diagnostic for a `slancha-mesh` specialist node."""
     report = DoctorReport()
     report.append(check_tailnet_specialist_ready())
     report.append(check_recommended_engine_installed())
     report.append(check_router_reachable())
+    report.append(check_model_port_acl_reachable())
     report.append(check_nvidia_smi())
     report.append(check_node_token_env())
     report.append(check_port_listener(node_info_port))

@@ -12,6 +12,7 @@ from mesh.scripts.mesh_doctor import (
     NODE_ID_ENV,
     NODE_TOKEN_ENV,
     REGISTRY_URL_ENV,
+    check_model_port_acl_reachable,
     check_node_token_env,
     check_nvidia_smi,
     check_port_listener,
@@ -180,6 +181,32 @@ def test_check_systemd_unit_inactive(monkeypatch):
 def test_check_port_listener_returns_pass_or_warn():
     r = check_port_listener(8088)
     assert r.status in ("pass", "warn")
+
+
+def test_check_model_port_acl_pass_on_acl_port():
+    # serving on the vLLM convention port (8003) → gateway-routable
+    r = check_model_port_acl_reachable(is_listening=lambda p: p == 8003)
+    assert r.status == "pass"
+    assert "8003" in r.detail
+
+
+def test_check_model_port_acl_warns_on_off_acl_port():
+    # slancha-local default :8000, nothing on the ACL set → the #8 silent failure
+    r = check_model_port_acl_reachable(is_listening=lambda p: p == 8000)
+    assert r.status == "warn"
+    assert "8000" in r.detail
+    assert "8003" in r.fix  # steers back to the convention port
+
+
+def test_check_model_port_acl_prefers_acl_when_both_listening():
+    # a dev vLLM on :8001 AND the real specialist on :8003 → still routable
+    r = check_model_port_acl_reachable(is_listening=lambda p: p in (8001, 8003))
+    assert r.status == "pass"
+
+
+def test_check_model_port_acl_skip_when_nothing_listening():
+    r = check_model_port_acl_reachable(is_listening=lambda p: False)
+    assert r.status == "skip"
 
 
 def test_run_doctor_returns_finalized_report(monkeypatch):
