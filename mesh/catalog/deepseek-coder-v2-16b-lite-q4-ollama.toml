@@ -1,0 +1,31 @@
+# DRAFT — unvalidated. Targets `ollama pull deepseek-coder-v2:16b-lite-instruct-q4_K_M`.
+# Card schema-checked + loadable; no live serve + heartbeat + route call yet.
+#
+# Hard-tier specialist: code generation on top of the 7B-Q4 workhorse.
+# DeepSeek-Coder-V2-Lite is a 16B MoE with ~2.4B activated parameters per token,
+# so VRAM footprint scales like ~9 GB at Q4_K_M (much smaller than a dense 16B)
+# while quality on HumanEval+ and LiveCodeBench rivals proprietary 30B-class
+# code models. Fits comfortably on a single 12 GB consumer GPU.
+model_id = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+specialist_id = "deepseek-coder-v2-16b-lite-q4-ollama"
+domain = "code"
+difficulty_tiers = ["medium", "hard"]
+languages = ["en"]
+required_backend = "ollama"
+ollama_tag = "deepseek-coder-v2:16b-lite-instruct-q4_K_M"
+storage_gb = 9.1
+runtime_gb = 10.5
+min_vram_gb = 12.0
+context_window = 163840
+n_layers = 27
+hidden_size = 2048
+supports_lora_finetune = false
+upstream_model_card = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+coverage_tier = 1
+
+[estimated_tps_at]
+gb10 = 35.0
+m4_pro = 25.0
+m3_ultra = 55.0
+rtx_4090 = 70.0
+rtx_3090 = 50.0

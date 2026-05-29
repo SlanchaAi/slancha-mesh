@@ -1,0 +1,34 @@
+# DRAFT — unvalidated. Targets `ollama pull phi3.5:3.8b-mini-instruct-q5_K_M`.
+# Card schema-checked + loadable; no live serve + heartbeat + route call yet.
+#
+# Easy-tier specialist: low-latency fast path for tiny boxes.
+# Phi-3.5-mini-instruct is 3.8B params; Q5_K_M lands in ~3 GB so it fits on a
+# Mac mini (M-series 8 GB), a Raspberry Pi 5 with eGPU, or a laptop iGPU.
+# Useful for classify/route hops and short single-shot prompts where the
+# bigger specialists would be overkill. Not a long-context model — capped
+# at the upstream 128k window claim, but in practice anything past ~32k
+# degrades sharply at this size.
+model_id = "microsoft/Phi-3.5-mini-instruct"
+specialist_id = "phi-3.5-mini-q5-ollama"
+domain = "general"
+difficulty_tiers = ["easy"]
+languages = ["en"]
+required_backend = "ollama"
+ollama_tag = "phi3.5:3.8b-mini-instruct-q5_K_M"
+storage_gb = 2.8
+runtime_gb = 3.5
+min_vram_gb = 4.0
+context_window = 131072
+n_layers = 32
+hidden_size = 3072
+supports_lora_finetune = false
+upstream_model_card = "microsoft/Phi-3.5-mini-instruct"
+coverage_tier = 1
+
+[estimated_tps_at]
+gb10 = 55.0
+m4_pro = 50.0
+m3_ultra = 100.0
+rtx_4090 = 150.0
+rtx_3090 = 110.0
+rpi5 = 6.0

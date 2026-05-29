@@ -1,0 +1,32 @@
+# DRAFT — unvalidated. Targets `ollama pull mistral-nemo:12b-instruct-2407-q4_K_M`.
+# Card schema-checked + loadable; no live serve + heartbeat + route call yet.
+#
+# Tier-2 reasoning specialist for mid-tier hardware (~10 GB VRAM).
+# Mistral-Nemo-12B-Instruct-2407 is a Mistral / NVIDIA collaboration with
+# strong reasoning + tool-use behavior at a size that fits on a single
+# 12 GB consumer GPU at Q4_K_M. Pairs with phi-4-14b-q4 as the next tier
+# up when 12 GB is the constraint and phi-4 won't fit.
+model_id = "mistralai/Mistral-Nemo-Instruct-2407"
+specialist_id = "mistral-nemo-12b-q4-ollama"
+domain = "reasoning"
+difficulty_tiers = ["medium", "hard"]
+languages = ["en", "fr", "de", "es"]
+required_backend = "ollama"
+ollama_tag = "mistral-nemo:12b-instruct-2407-q4_K_M"
+storage_gb = 7.5
+runtime_gb = 9.0
+min_vram_gb = 10.0
+context_window = 128000
+n_layers = 40
+hidden_size = 5120
+supports_lora_finetune = false
+upstream_model_card = "mistralai/Mistral-Nemo-Instruct-2407"
+coverage_tier = 2
+capabilities = ["tools", "json_mode"]
+
+[estimated_tps_at]
+gb10 = 30.0
+m4_pro = 22.0
+m3_ultra = 50.0
+rtx_4090 = 75.0
+rtx_3090 = 50.0

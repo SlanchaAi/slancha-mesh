@@ -1,0 +1,32 @@
+# DRAFT — unvalidated. The card targets `ollama pull qwen2.5-coder:7b-instruct-q4_K_M`
+# and has been schema-checked + loaded into the registry, but no live serve +
+# heartbeat + route call has been demonstrated against this exact tag yet.
+#
+# Tier-1 specialist: programming / code generation, Ollama (GGUF Q4_K_M) edition.
+# Qwen2.5-Coder-7B is the LocalLLaMA-class workhorse for code: Q4_K_M fits a
+# single 8 GB consumer GPU with margin for KV cache, and the public benchmarks
+# show it within ~1 pt of FP16 on HumanEval and MBPP. Pairs with the bigger
+# qwen3-coder-30b-a3b-fp8 specialist for hard-tier routing.
+model_id = "Qwen/Qwen2.5-Coder-7B-Instruct"
+specialist_id = "qwen2.5-coder-7b-q4-ollama"
+domain = "code"
+difficulty_tiers = ["easy", "medium"]
+languages = ["en"]
+required_backend = "ollama"
+ollama_tag = "qwen2.5-coder:7b-instruct-q4_K_M"
+storage_gb = 4.7
+runtime_gb = 6.0
+min_vram_gb = 6.0
+context_window = 32768
+n_layers = 28
+hidden_size = 3584
+supports_lora_finetune = false
+upstream_model_card = "Qwen/Qwen2.5-Coder-7B-Instruct"
+coverage_tier = 1
+
+[estimated_tps_at]
+gb10 = 35.0
+m4_pro = 35.0
+m3_ultra = 70.0
+rtx_4090 = 95.0
+rtx_3090 = 65.0

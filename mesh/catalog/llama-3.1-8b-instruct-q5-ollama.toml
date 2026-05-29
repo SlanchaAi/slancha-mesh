@@ -1,0 +1,37 @@
+# DRAFT — unvalidated. The card targets `ollama pull llama3.1:8b-instruct-q5_K_M`
+# and has been schema-checked + loaded into the registry, but no live serve +
+# heartbeat + route call has been demonstrated against this exact tag yet.
+# Mark validated by editing the catalog status doc once you have a green
+# `slancha-mesh up --specialist llama-3.1-8b-instruct-q5-ollama` end-to-end.
+#
+# Tier-1 specialist: general-purpose fallback, Ollama (GGUF Q5_K_M) edition.
+# Q5_K_M chosen over Q4_K_M because Llama-3.1-8B is a fallback target where
+# quality regression hurts more than the +1 GB VRAM cost (Q5 keeps near-FP16
+# parity on MMLU/HellaSwag in published Ollama benchmarks).
+model_id = "meta-llama/Llama-3.1-8B-Instruct"
+specialist_id = "llama-3.1-8b-instruct-q5-ollama"
+domain = "general"
+difficulty_tiers = ["easy", "medium"]
+languages = ["en"]
+required_backend = "ollama"
+ollama_tag = "llama3.1:8b-instruct-q5_K_M"
+storage_gb = 5.7
+runtime_gb = 7.0
+min_vram_gb = 8.0
+context_window = 128000
+n_layers = 32
+hidden_size = 4096
+supports_lora_finetune = false
+upstream_model_card = "meta-llama/Llama-3.1-8B-Instruct"
+coverage_tier = 1
+
+# Community-reported throughput across common LocalLLaMA classes; numbers
+# are projections from upstream Ollama / llama.cpp benchmarks at Q5_K_M,
+# NOT measured on this catalog. The mesh allocator only uses these for
+# tie-breaking, so being conservative is the safe direction.
+[estimated_tps_at]
+gb10 = 30.0
+m4_pro = 30.0
+m3_ultra = 60.0
+rtx_4090 = 80.0
+rtx_3090 = 55.0

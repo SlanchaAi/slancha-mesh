@@ -1,0 +1,35 @@
+# DRAFT — unvalidated. Targets `ollama pull gemma2:9b-instruct-q4_K_M`.
+# Card schema-checked + loadable; no live serve + heartbeat + route call yet.
+#
+# Tier-2 multilingual specialist: Gemma-2-9B-instruct edition for
+# non-English routing. Google trained gemma-2 on a multilingual blend
+# substantially broader than llama-3.1 (especially Romance + East Asian),
+# making it the sensible fallback when a query is non-English and a
+# specialized multilingual specialist (aya-expanse-8b) isn't loaded.
+# Q4_K_M ~5.4 GB so it fits on a 6 GB consumer GPU (RTX 3060 12 GB has
+# room for KV cache headroom).
+model_id = "google/gemma-2-9b-it"
+specialist_id = "gemma-2-9b-q4-ollama"
+domain = "multilingual"
+difficulty_tiers = ["easy", "medium"]
+# Gemma-2 was pre-trained on a broad multilingual corpus; this is the
+# subset where vendor evals show MMLU-multilingual > 60.
+languages = ["en", "es", "fr", "de", "it", "pt", "zh", "ja", "ko"]
+required_backend = "ollama"
+ollama_tag = "gemma2:9b-instruct-q4_K_M"
+storage_gb = 5.4
+runtime_gb = 6.5
+min_vram_gb = 7.0
+context_window = 8192
+n_layers = 42
+hidden_size = 3584
+supports_lora_finetune = false
+upstream_model_card = "google/gemma-2-9b-it"
+coverage_tier = 2
+
+[estimated_tps_at]
+gb10 = 32.0
+m4_pro = 28.0
+m3_ultra = 60.0
+rtx_4090 = 85.0
+rtx_3090 = 60.0
