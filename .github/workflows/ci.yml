@@ -45,3 +45,38 @@ jobs:
 
       - name: Validate catalog (substrate sanity)
         run: uv run --python ${{ matrix.python-version }} python -m mesh.validate_card --strict
+
+  # The docker/ registry image (the push/central-registry control plane) had
+  # no CI coverage — it could bit-rot silently. Build it + smoke the live
+  # endpoints so a broken Dockerfile/service boot fails the PR.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build registry image
+        run: docker build -t slancha-registry:ci -f docker/Dockerfile .
+
+      - name: Run registry
+        run: docker run -d --name reg -p 8088:8088 slancha-registry:ci
+
+      - name: Smoke test (health + clean registry + input validation)
+        run: |
+          set -e
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/health 2>/dev/null || true)
+            [ "$code" = "200" ] && break
+            sleep 1
+          done
+          echo "health: $(curl -fsS http://127.0.0.1:8088/health)"
+          curl -fsS http://127.0.0.1:8088/health | grep -q '"status":"ok"'
+          # A fresh registry must be node-empty but ship the auto-loaded catalog.
+          curl -fsS http://127.0.0.1:8088/registry | python3 -c 'import sys, json; s = json.load(sys.stdin)["snapshot"]; assert s["nodes"] == {}, "fresh registry has unexpected nodes: %r" % s["nodes"]; assert len(s.get("catalog", {})) >= 1, "catalog did not auto-load"; print("registry ok: nodes=0 catalog=%d" % len(s["catalog"]))'
+          # Malformed heartbeat body must be rejected by pydantic (422), not 500.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8088/heartbeat -H 'content-type: application/json' -d '{"bogus":1}')
+          [ "$code" = "422" ] || { echo "expected 422 on junk heartbeat, got $code"; exit 1; }
+          echo "docker smoke OK"
+
+      - name: Registry logs on failure
+        if: failure()
+        run: docker logs reg || true
