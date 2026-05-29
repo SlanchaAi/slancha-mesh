@@ -33,8 +33,14 @@ slancha-mesh discover                        # any consumer: walk the tailnet �
 
 Discovery is **pull-based**: a consumer walks `tailscale status` for
 `tag:specialist` peers and pulls each node's `/models` over the tailnet — no
-heartbeat-push, no central registry, no shared token. Tailnet membership +
-the ACL is the credential. Contributor walkthrough: `NODE_SETUP.md`.
+central registry to run, no heartbeat-push between nodes, no shared write
+token. Tailnet membership + the ACL is the credential.
+
+Each node *does* keep a registry — but a local one, filled by its own
+heartbeat loop and served on its `/models` endpoint. A central, cross-node
+registry is optional: it appears only when you mount `mesh.service` into
+slancha-api ([Wire to slancha-api](#wire-to-slancha-api)). Contributor
+walkthrough: `NODE_SETUP.md`.
 
 ## What ships (current state)
 
@@ -128,9 +134,10 @@ cache or downloadable by `huggingface-cli download`. See
 
 ### Wire to slancha-api
 
-`mesh/registry.py` exposes the FastAPI request/response shapes
-(`HeartbeatPostRequest`, `RegistryGetResponse`). Import on slancha-api
-and wrap a `MeshRegistry` instance behind
+This is the optional **central** registry mode — the standalone mesh above is
+pull-only and needs none of it. `mesh/registry.py` exposes the FastAPI
+request/response shapes (`HeartbeatPostRequest`, `RegistryGetResponse`). Import
+on slancha-api and wrap a `MeshRegistry` instance behind
 `POST /mesh/v1/heartbeat` + `GET /mesh/v1/registry`.
 
 ### Plug into existing selector
