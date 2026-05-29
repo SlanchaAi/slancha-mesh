@@ -403,7 +403,10 @@ def test_chat_completions_502_on_upstream_connect_failure():
         json={"model": "qwen2.5-coder-7b-q4-ollama", "messages": []},
     )
     assert r.status_code == 502
-    assert "unreachable" in r.json()["detail"]
+    detail = r.json()["detail"]
+    # New fallback-chain message shape ("all N reachable node(s) failed");
+    # still surfaces the underlying error class.
+    assert "failed" in detail and "ConnectError" in detail
 
 
 def test_chat_completions_forwards_upstream_non_200_verbatim():
@@ -516,7 +519,236 @@ def test_chat_completions_stream_502_on_upstream_connect_failure():
         },
     )
     assert r.status_code == 502
-    assert "unreachable" in r.json()["detail"]
+    detail = r.json()["detail"]
+    # New fallback-chain message shape ("all N reachable node(s) failed");
+    # still surfaces the underlying error class.
+    assert "failed" in detail and "ConnectError" in detail
+
+
+# ---------------------------------------------------------------------------
+# Fallback chain — upstream 5xx / connect failure tries the next binding
+# ---------------------------------------------------------------------------
+
+
+def test_chat_completions_falls_through_on_connect_failure_to_next_binding():
+    """First reachable binding hard-fails to connect; router must try the
+    next one. The successful binding's audit headers reflect the fallback."""
+    snap = _snapshot(
+        cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+        bindings={
+            "qwen2.5-coder-7b-q4-ollama": [
+                _binding(
+                    node_id="dead-node",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url="http://10.0.0.99:11434",
+                ),
+                _binding(
+                    node_id="live-node",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url="http://10.0.0.5:11434",
+                ),
+            ]
+        },
+    )
+
+    def handler(request: httpx.Request):
+        host = request.url.host
+        if host == "10.0.0.99":
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(200, json={"id": "ok"})
+
+    client = _client(snap, handler)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "qwen2.5-coder-7b-q4-ollama", "messages": []},
+    )
+    assert r.status_code == 200
+    assert r.headers["X-Slancha-Node"] == "live-node"
+    assert "fallback#1" in r.headers["X-Slancha-Reason"]
+
+
+def test_chat_completions_retries_on_upstream_502_503_504():
+    """Retriable 5xx statuses (502/503/504) must fall through; 500 does too
+    is debatable — phase-1 keeps the retry set conservative to {502,503,504}."""
+    snap = _snapshot(
+        cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+        bindings={
+            "qwen2.5-coder-7b-q4-ollama": [
+                _binding(
+                    node_id="overloaded",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url="http://10.0.0.99:11434",
+                ),
+                _binding(
+                    node_id="ok-node",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url="http://10.0.0.5:11434",
+                ),
+            ]
+        },
+    )
+
+    def handler(request: httpx.Request):
+        host = request.url.host
+        if host == "10.0.0.99":
+            return httpx.Response(503, json={"error": "overloaded"})
+        return httpx.Response(200, json={"id": "ok"})
+
+    client = _client(snap, handler)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "qwen2.5-coder-7b-q4-ollama", "messages": []},
+    )
+    assert r.status_code == 200
+    assert r.headers["X-Slancha-Node"] == "ok-node"
+
+
+def test_chat_completions_does_not_retry_on_4xx_client_error():
+    """4xx = client error — same body would be rejected by any node. Forward."""
+    snap = _snapshot(
+        cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+        bindings={
+            "qwen2.5-coder-7b-q4-ollama": [
+                _binding(
+                    node_id="strict-node",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url="http://10.0.0.5:11434",
+                ),
+                _binding(
+                    node_id="other-node",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url="http://10.0.0.6:11434",
+                ),
+            ]
+        },
+    )
+    upstream_calls: list[str] = []
+
+    def handler(request: httpx.Request):
+        upstream_calls.append(request.url.host)
+        return httpx.Response(400, json={"error": "bad request"})
+
+    client = _client(snap, handler)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "qwen2.5-coder-7b-q4-ollama", "messages": []},
+    )
+    assert r.status_code == 400
+    assert upstream_calls == ["10.0.0.5"]  # NOT retried on the next node
+
+
+def test_chat_completions_502_when_all_bindings_fail():
+    """All reachable bindings 5xx / connect-fail → 502 with the last cause
+    surfaced. Detail names how many were tried."""
+    snap = _snapshot(
+        cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+        bindings={
+            "qwen2.5-coder-7b-q4-ollama": [
+                _binding(
+                    node_id=f"node-{i}",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url=f"http://10.0.0.{i}:11434",
+                )
+                for i in (1, 2, 3)
+            ]
+        },
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx.Request):
+        calls.append(request.url.host)
+        return httpx.Response(503, json={"error": "loaded"})
+
+    client = _client(snap, handler)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "qwen2.5-coder-7b-q4-ollama", "messages": []},
+    )
+    assert r.status_code == 502
+    # All three bindings must have been tried before giving up.
+    assert calls == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    detail = r.json()["detail"]
+    assert "all 3" in detail
+    assert "last_status=503" in detail
+
+
+def test_chat_completions_stream_falls_through_on_upstream_502():
+    """Streaming retry on PRE-headers failure: upstream returns 502 →
+    open next binding, then stream from it.
+
+    Once any byte is forwarded the router is committed to that binding
+    (no mid-stream retry — that would duplicate `delta` chunks downstream
+    and violate the streaming contract). This test exercises only the
+    pre-byte retry path.
+    """
+    snap = _snapshot(
+        cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+        bindings={
+            "qwen2.5-coder-7b-q4-ollama": [
+                _binding(
+                    node_id="overloaded",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url="http://10.0.0.99:11434",
+                ),
+                _binding(
+                    node_id="ok-node",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url="http://10.0.0.5:11434",
+                ),
+            ]
+        },
+    )
+    sse_body = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
+
+    def handler(request: httpx.Request):
+        if request.url.host == "10.0.0.99":
+            return httpx.Response(502, json={"error": "down"})
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = _client(snap, handler)
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "qwen2.5-coder-7b-q4-ollama",
+            "messages": [],
+            "stream": True,
+        },
+    )
+    assert r.status_code == 200
+    assert r.content == sse_body
+    assert r.headers["X-Slancha-Node"] == "ok-node"
+
+
+def test_reachable_bindings_helper_filters_unreachable_and_no_url():
+    """Unit-level: `_reachable_bindings` skips unreachable health AND
+    bindings missing a `node_url`. Order preserved."""
+    from mesh.router_app import _reachable_bindings
+
+    snap = _snapshot(
+        cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+        bindings={
+            "qwen2.5-coder-7b-q4-ollama": [
+                _binding(node_id="a", specialist_id="qwen2.5-coder-7b-q4-ollama"),
+                _binding(
+                    node_id="b",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    health="unreachable",
+                ),
+                _binding(
+                    node_id="c",
+                    specialist_id="qwen2.5-coder-7b-q4-ollama",
+                    node_url=None,
+                ),
+                _binding(node_id="d", specialist_id="qwen2.5-coder-7b-q4-ollama"),
+            ]
+        },
+    )
+    out = _reachable_bindings("qwen2.5-coder-7b-q4-ollama", snap)
+    assert [b.node_id for b in out] == ["a", "d"]
 
 
 def test_chat_completions_stream_rewrites_model_for_ollama_upstream():

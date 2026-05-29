@@ -118,26 +118,41 @@ def verify_router_token(
 # ---------------------------------------------------------------------------
 
 
-def _pick_binding(
+def _reachable_bindings(
     specialist_id: str,
     snapshot: RegistrySnapshot,
-) -> NodeBinding | None:
-    """Return the first reachable `NodeBinding` for the specialist, or None.
+) -> list[NodeBinding]:
+    """Return every reachable `NodeBinding` for the specialist, in order.
 
-    "First reachable" today = first binding whose health is not
-    `unreachable` AND whose `node_url` is set. The snapshot's binding
-    order reflects insertion order (heartbeat arrival), which is
-    deterministic per replay. A future PR can wire a quality-aware
-    pick using `MeshSelectionResult` semantics directly.
+    "Reachable" = health is not `unreachable` AND `node_url` is set.
+    The snapshot's binding order reflects insertion order (heartbeat
+    arrival), which is deterministic per replay. Callers use the head
+    as the primary and walk down the tail as the fallback chain — when
+    the primary returns a 5xx or connect-fails, the next binding is
+    tried, and so on until one succeeds OR the list is exhausted.
+
+    A future PR can rank by quality / queue depth / p95 using
+    `MeshSelectionResult` semantics directly; today the order is a
+    first-good-wins shape.
     """
-    bindings = snapshot.specialists.get(specialist_id) or []
-    for b in bindings:
+    out: list[NodeBinding] = []
+    for b in snapshot.specialists.get(specialist_id) or []:
         if b.health == "unreachable":
             continue
         if not b.node_url:
             continue
-        return b
-    return None
+        out.append(b)
+    return out
+
+
+# Statuses worth retrying on. 5xx = upstream service problem (worth trying
+# another node); 4xx = client error (retrying changes nothing — same body
+# would be rejected by the next node too). 2xx / 3xx obviously don't retry.
+_RETRY_UPSTREAM_STATUSES = frozenset({502, 503, 504})
+
+
+def _is_retriable_status(status_code: int) -> bool:
+    return status_code in _RETRY_UPSTREAM_STATUSES
 
 
 def _rewrite_model_for_upstream(
@@ -202,7 +217,7 @@ def discovery_to_snapshot(
 ) -> RegistrySnapshot:
     """Translate a pull-discovery result into a `RegistrySnapshot`.
 
-    The router needs a snapshot for `_pick_binding` + `_rewrite_model_for_
+    The router needs a snapshot for `_reachable_bindings` + `_rewrite_model_for_
     upstream`. In push mode the snapshot comes from `MeshRegistry.snapshot()`;
     in pull mode we synthesize one from `discover_specialists`. Bindings
     are minimal — we know the URL is currently reachable (we just GET'd
@@ -335,71 +350,102 @@ class _RefreshingSnapshot:
 # ---------------------------------------------------------------------------
 
 
-async def _proxy_stream(
+async def _proxy_stream_with_fallback(
     client: httpx.AsyncClient,
     *,
-    upstream_url: str,
+    bindings: list[NodeBinding],
+    specialist_id: str,
     upstream_body: dict,
     authorization: str | None,
-    slancha_headers: dict[str, str],
 ) -> StreamingResponse:
-    """Open a streaming request to the upstream, forward bytes as they arrive.
+    """Open a streaming request, falling through the binding chain on failure.
 
-    OpenAI's chat completions SSE format is a sequence of
-    `data: {...}\\n\\n` lines terminated by `data: [DONE]\\n\\n`. Both
-    vLLM and Ollama emit it natively; we pass bytes through unchanged
-    so the upstream's chunk shape is what reaches the client.
+    OpenAI chat-completions SSE is a sequence of `data: {...}\\n\\n` lines
+    ending in `data: [DONE]\\n\\n`. Both vLLM and Ollama emit it natively;
+    we pass bytes through unchanged.
 
-    Upstream failures map to:
-      - connect / pre-headers errors → 502 BAD GATEWAY (HTTPException),
-        same as the non-streaming path; FastAPI emits the JSON detail.
-      - mid-stream disconnect → the generator raises out, the chunked
-        response closes early. Most clients tolerate this as
-        end-of-message; we deliberately do NOT inject a synthesized
-        `[DONE]` because doing so could mask a real upstream truncation.
+    **Retry boundary is "before first byte forwarded":** if opening the
+    stream raises (`httpx.HTTPError` / `OSError`) or the upstream replies
+    with a retriable 5xx status (502 / 503 / 504), we close + try the
+    next binding. Once we start yielding bytes from `aiter_bytes()`,
+    we're stuck with that binding — retrying mid-stream would emit
+    duplicate `delta` chunks downstream, which violates OpenAI's
+    streaming contract.
 
-    The upstream's `Content-Type` (typically `text/event-stream`) is
-    preserved; cache-control hints typical of SSE are not synthesized —
-    we forward whatever the upstream sent.
+    All bindings exhausted → 502 BAD GATEWAY, mirroring the
+    non-streaming path.
+
+    Mid-stream upstream death → the generator raises out, the chunked
+    response closes early. Most clients tolerate this as end-of-message;
+    we deliberately do NOT inject a synthesized `[DONE]` because that
+    could mask a real upstream truncation.
     """
-    try:
-        # `client.stream(...)` is an async context manager around the
-        # request; we keep it alive for the duration of the generator
-        # so the connection stays open while we forward chunks.
+    last_status: int | None = None
+    last_detail: str | None = None
+    for binding in bindings:
+        upstream_url = f"{binding.node_url.rstrip('/')}/v1/chat/completions"  # type: ignore[union-attr]
         stream_ctx = client.stream(
             "POST",
             upstream_url,
             json=upstream_body,
             headers=_upstream_headers(authorization),
         )
-        response = await stream_ctx.__aenter__()
-    except (httpx.HTTPError, OSError) as exc:
-        _log.warning("[router] upstream stream %s unreachable: %s", upstream_url, exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=(
-                f"upstream unreachable at {upstream_url}: "
-                f"{exc.__class__.__name__}"
-            ),
-        ) from exc
-
-    media_type = response.headers.get("content-type", "text/event-stream")
-    upstream_status = response.status_code
-
-    async def gen():
         try:
-            async for chunk in response.aiter_bytes():
-                if chunk:
-                    yield chunk
-        finally:
+            response = await stream_ctx.__aenter__()
+        except (httpx.HTTPError, OSError) as exc:
+            last_detail = f"{exc.__class__.__name__} at {upstream_url}"
+            _log.warning(
+                "[router] stream connect to %s for %s failed: %s; trying next",
+                binding.node_id,
+                specialist_id,
+                exc,
+            )
+            continue
+        if _is_retriable_status(response.status_code):
+            last_status = response.status_code
+            _log.warning(
+                "[router] stream upstream %s for %s returned %d; trying next",
+                binding.node_id,
+                specialist_id,
+                response.status_code,
+            )
             await stream_ctx.__aexit__(None, None, None)
+            continue
 
-    return StreamingResponse(
-        gen(),
-        status_code=upstream_status,
-        media_type=media_type,
-        headers=slancha_headers,
+        # This binding wins — set up the generator that holds the
+        # stream context open until the upstream closes.
+        media_type = response.headers.get("content-type", "text/event-stream")
+        upstream_status = response.status_code
+        slancha_headers = {
+            "X-Slancha-Specialist": specialist_id,
+            "X-Slancha-Node": binding.node_id,
+            "X-Slancha-Reason": (
+                f"primary; queue_depth={binding.queue_depth} "
+                f"p95={binding.p95_latency_ms_60s}"
+            ),
+        }
+
+        async def gen(_ctx=stream_ctx, _resp=response):
+            try:
+                async for chunk in _resp.aiter_bytes():
+                    if chunk:
+                        yield chunk
+            finally:
+                await _ctx.__aexit__(None, None, None)
+
+        return StreamingResponse(
+            gen(),
+            status_code=upstream_status,
+            media_type=media_type,
+            headers=slancha_headers,
+        )
+
+    # All bindings exhausted.
+    detail = (
+        f"all {len(bindings)} reachable node(s) failed to open a stream for "
+        f"{specialist_id!r}: last_status={last_status} last_error={last_detail}"
     )
+    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
 
 
 # ---------------------------------------------------------------------------
@@ -508,8 +554,8 @@ def create_router_app(
             )
 
         snap = _snapshot()
-        binding = _pick_binding(specialist_id, snap)
-        if binding is None:
+        bindings = _reachable_bindings(specialist_id, snap)
+        if not bindings:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=(
@@ -518,55 +564,73 @@ def create_router_app(
                 ),
             )
 
-        upstream_url = f"{binding.node_url.rstrip('/')}/v1/chat/completions"
         upstream_body = _rewrite_model_for_upstream(body, specialist_id, snap)
-        slancha_headers = {
-            "X-Slancha-Specialist": specialist_id,
-            "X-Slancha-Node": binding.node_id,
-            "X-Slancha-Reason": (
-                f"primary; queue_depth={binding.queue_depth} "
-                f"p95={binding.p95_latency_ms_60s}"
-            ),
-        }
 
         if body.get("stream") is True:
-            return await _proxy_stream(
+            return await _proxy_stream_with_fallback(
                 client,
-                upstream_url=upstream_url,
+                bindings=bindings,
+                specialist_id=specialist_id,
                 upstream_body=upstream_body,
                 authorization=authorization,
-                slancha_headers=slancha_headers,
             )
 
-        try:
-            upstream = await client.post(
-                upstream_url,
-                json=upstream_body,
-                headers=_upstream_headers(authorization),
-            )
-        except (httpx.HTTPError, OSError) as exc:
-            _log.warning(
-                "[router] upstream %s for %s unreachable: %s",
-                upstream_url,
-                specialist_id,
-                exc,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=(
-                    f"upstream node {binding.node_id} unreachable at {upstream_url}: "
-                    f"{exc.__class__.__name__}"
+        # Non-streaming fallback chain: try each binding in order; first
+        # success wins; retriable failures fall through to the next.
+        last_status: int | None = None
+        last_detail: str | None = None
+        for idx, binding in enumerate(bindings):
+            upstream_url = f"{binding.node_url.rstrip('/')}/v1/chat/completions"  # type: ignore[union-attr]
+            try:
+                upstream = await client.post(
+                    upstream_url,
+                    json=upstream_body,
+                    headers=_upstream_headers(authorization),
+                )
+            except (httpx.HTTPError, OSError) as exc:
+                last_detail = f"{exc.__class__.__name__} at {upstream_url}"
+                _log.warning(
+                    "[router] upstream %s for %s unreachable: %s; trying next",
+                    binding.node_id,
+                    specialist_id,
+                    exc,
+                )
+                continue
+            if _is_retriable_status(upstream.status_code):
+                last_status = upstream.status_code
+                _log.warning(
+                    "[router] upstream %s for %s returned %d; trying next",
+                    binding.node_id,
+                    specialist_id,
+                    upstream.status_code,
+                )
+                continue
+            # Win — forward as-is.
+            position = "primary" if idx == 0 else f"fallback#{idx}"
+            slancha_headers = {
+                "X-Slancha-Specialist": specialist_id,
+                "X-Slancha-Node": binding.node_id,
+                "X-Slancha-Reason": (
+                    f"{position}; queue_depth={binding.queue_depth} "
+                    f"p95={binding.p95_latency_ms_60s}"
                 ),
-            ) from exc
+            }
+            media_type = upstream.headers.get("content-type", "application/json")
+            return Response(
+                content=upstream.content,
+                status_code=upstream.status_code,
+                media_type=media_type,
+                headers=slancha_headers,
+            )
 
-        # Forward the upstream body byte-for-byte; we touch only the headers
-        # the OpenAI spec lets us own + add our routing-audit headers.
-        media_type = upstream.headers.get("content-type", "application/json")
-        return Response(
-            content=upstream.content,
-            status_code=upstream.status_code,
-            media_type=media_type,
-            headers=slancha_headers,
+        # All bindings exhausted.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"all {len(bindings)} reachable node(s) failed for "
+                f"{specialist_id!r}: last_status={last_status} "
+                f"last_error={last_detail}"
+            ),
         )
 
     @app.get("/health")
