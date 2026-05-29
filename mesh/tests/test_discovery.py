@@ -16,10 +16,12 @@ import json
 import pytest
 
 from mesh.discovery import (
+    DEFAULT_SPECIALIST_TAG,
     DiscoveryResult,
     discover_specialists,
     parse_specialist_peers,
     pin_host,
+    synthesize_lan_status,
 )
 
 # A captured `tailscale status --json`: Self (a specialist) + two peers, one
@@ -239,3 +241,72 @@ def test_discover_keeps_valid_url_when_another_is_malformed():
     assert all("notaport" not in u for u in spec.node_urls)  # malformed dropped
     assert all(u.endswith(":8003") for u in spec.node_urls)  # only the good port
     assert all("evil.example" not in u for u in spec.node_urls)  # still host-pinned
+
+
+# ---------------------------------------------------------------------------
+# LAN-only mode — `--peer` synthesizes a tailscale-status shape
+# ---------------------------------------------------------------------------
+
+
+def test_synthesize_lan_status_empty_returns_empty_peer_map():
+    """No peers = no walk; downstream `discover_specialists` returns zeroes."""
+    status = synthesize_lan_status([])
+    assert status == {"Peer": {}}
+
+
+def test_synthesize_lan_status_tags_each_host_as_online_specialist():
+    """Each `--peer` host must come out as Online + tagged so it's walked."""
+    status = synthesize_lan_status(["192.168.1.10", "mac-mini.local"])
+    peer_map = status["Peer"]
+    assert len(peer_map) == 2
+    hosts = {entry["DNSName"] for entry in peer_map.values()}
+    assert hosts == {"192.168.1.10", "mac-mini.local"}
+    for entry in peer_map.values():
+        assert entry["Online"] is True
+        assert DEFAULT_SPECIALIST_TAG in entry["Tags"]
+
+
+def test_synthesize_lan_status_omits_self_entry():
+    """LAN mode is explicit: `--peer localhost` adds the local node; the
+    synthesizer never invents a Self entry behind the operator's back."""
+    status = synthesize_lan_status(["10.0.0.5"])
+    assert "Self" not in status
+    # parse_specialist_peers must therefore not return a self-peer when
+    # include_self=True is passed to it (cli.py turns include_self off in
+    # `--peer` mode, but the parser-level test pins the no-Self contract).
+    peers = parse_specialist_peers(status, include_self=True)
+    assert not any(p.is_self for p in peers)
+
+
+def test_discover_via_synthesized_lan_status_walks_each_peer():
+    """End-to-end: synthesize_lan_status → discover_specialists with a stub
+    fetch returns the expected aggregate. This is the LAN happy path the
+    README's 5-minute quickstart depends on."""
+    fetches: list[str] = []
+
+    def fetch(host, port):
+        fetches.append(host)
+        return _models_payload(f"code-{host.replace('.', '-')}", port=8003)
+
+    status = synthesize_lan_status(["192.168.1.10", "192.168.1.20"])
+    result = discover_specialists(status, fetch=fetch, node_info_port=8088)
+    assert sorted(fetches) == ["192.168.1.10", "192.168.1.20"]
+    assert sorted(result.reachable) == ["192.168.1.10", "192.168.1.20"]
+    # Each peer's payload yields a distinct specialist (different ids); both
+    # must end up in the aggregate.
+    assert len(result.specialists) == 2
+    for sid, spec in result.specialists.items():
+        assert spec.node_urls, f"{sid} has no node_urls"
+
+
+def test_discover_via_synthesized_lan_status_honors_custom_tag():
+    """`--tag` must propagate through synthesize → discover so a
+    non-default tag (`tag:lab-host`) doesn't silently drop every peer."""
+    status = synthesize_lan_status(["10.0.0.5"], specialist_tag="tag:lab-host")
+    # Default tag check should EXCLUDE this peer (wrong tag).
+    peers_default = parse_specialist_peers(status)
+    assert peers_default == []
+    # Custom-tag check should INCLUDE it.
+    peers_lab = parse_specialist_peers(status, specialist_tag="tag:lab-host")
+    assert len(peers_lab) == 1
+    assert peers_lab[0].host == "10.0.0.5"

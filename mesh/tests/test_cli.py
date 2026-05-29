@@ -210,3 +210,60 @@ def test_discover_renders_table(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "demo" in out
     assert "self.ts.net:8003" in out  # host-pinned to the dialed peer
+
+
+def test_discover_peer_flag_skips_tailscale_and_walks_explicit_hosts(monkeypatch, capsys):
+    """`--peer` flag enables raw-LAN federation: no Tailscale required.
+
+    The flag is what makes the README's 5-minute LAN quickstart work
+    without forcing every LocalLLaMA-class user onto Tailscale.
+    """
+
+    def boom(_cfg):
+        raise AssertionError("tailnet_status must NOT be called when --peer is set")
+
+    monkeypatch.setattr("mesh.cli.tailnet_status", boom)
+
+    dialed: list[str] = []
+
+    def fake_make_fetch(**kw):
+        def fetch(host, port):
+            dialed.append(host)
+            return {
+                "object": "list",
+                "data": [{
+                    "id": f"demo-from-{host.replace('.', '-')}",
+                    "object": "model",
+                    "routing_meta": {
+                        "model_id": "vendor/demo",
+                        "domain": "code",
+                        "capabilities": [],
+                        "quality": {"router_observed": None},
+                        "node_urls": ["http://ignored:8003"],
+                    },
+                }],
+            }
+        return fetch
+
+    monkeypatch.setattr("mesh.cli.make_http_fetch", fake_make_fetch)
+    rc = main(["discover", "--peer", "192.168.1.10", "--peer", "10.0.0.5"])
+    assert rc == 0
+    assert sorted(dialed) == ["10.0.0.5", "192.168.1.10"]
+    out = capsys.readouterr().out
+    # Both peers' specialists must surface in the table; host-pinned to the
+    # peer we actually dialed (claim-hijack defense still applies).
+    assert "demo-from-192-168-1-10" in out
+    assert "demo-from-10-0-0-5" in out
+    assert "192.168.1.10:8003" in out
+    assert "10.0.0.5:8003" in out
+
+
+def test_discover_no_peer_no_tailnet_still_errors(monkeypatch, capsys):
+    """Without `--peer` AND without Tailscale, the operator gets the original
+    error with a hint about `--peer` for raw-LAN discovery."""
+    monkeypatch.setattr("mesh.cli.tailnet_status", lambda cfg: None)
+    rc = main(["discover"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "tailscale status" in out
+    assert "--peer" in out  # hint at the LAN-mode escape hatch

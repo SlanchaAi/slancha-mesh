@@ -24,6 +24,7 @@ from mesh.discovery import (
     DEFAULT_NODE_INFO_PORT,
     discover_specialists,
     make_http_fetch,
+    synthesize_lan_status,
     parse_specialist_peers,
 )
 from mesh.tailnet import (
@@ -260,11 +261,21 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
-    status = tailnet_status(TailnetConfig(enabled=True))
-    if status is None:
-        _print("[discover] could not read `tailscale status --json` "
-               "(is tailscale up? is the binary on PATH?)")
-        return 1
+    if args.peer:
+        # Raw-LAN federation: skip Tailscale, synthesize a peer list from the
+        # explicit `--peer` flags. The trust boundary is the LAN itself; pair
+        # with `SLANCHA_NODE_TOKEN` (`--token`) if you want application-layer
+        # auth on top of network isolation.
+        status: dict | None = synthesize_lan_status(args.peer, specialist_tag=args.tag)
+        include_self = False  # `--peer` mode is explicit; no implicit self entry.
+    else:
+        status = tailnet_status(TailnetConfig(enabled=True))
+        if status is None:
+            _print("[discover] could not read `tailscale status --json` "
+                   "(is tailscale up? is the binary on PATH? "
+                   "or pass `--peer <host>` for raw-LAN discovery)")
+            return 1
+        include_self = not args.exclude_self
 
     token = args.token or os.environ.get(NODE_TOKEN_ENV) or None
     fetch = make_http_fetch(token=token, timeout=args.timeout)
@@ -273,7 +284,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
         fetch=fetch,
         node_info_port=args.node_info_port,
         specialist_tag=args.tag,
-        include_self=not args.exclude_self,
+        include_self=include_self,
     )
 
     if args.json:
@@ -397,12 +408,26 @@ def build_parser() -> argparse.ArgumentParser:
     pl.set_defaults(func=cmd_plan)
 
     # discover
-    disc = sub.add_parser("discover", help="Walk the tailnet → routing table of specialists.")
+    disc = sub.add_parser(
+        "discover",
+        help="Walk the tailnet (or a `--peer` list) → routing table of specialists.",
+    )
     disc.add_argument("--node-info-port", type=int, default=DEFAULT_NODE_INFO_PORT)
     disc.add_argument("--tag", default=DEFAULT_SPECIALIST_TAG, help="Tailnet tag to enumerate.")
     disc.add_argument("--token", default=None, help=f"Bearer token (else ${NODE_TOKEN_ENV}).")
     disc.add_argument("--timeout", type=float, default=4.0)
     disc.add_argument("--exclude-self", action="store_true", help="Skip the local node.")
+    disc.add_argument(
+        "--peer",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help=(
+            "Explicit peer host (LAN-only mode). Repeatable. Skips `tailscale status`; "
+            "the LAN is the trust boundary. Each host's node-info is fetched on "
+            "`--node-info-port`."
+        ),
+    )
     disc.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
     disc.set_defaults(func=cmd_discover)
 

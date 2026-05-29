@@ -304,8 +304,49 @@ def make_http_fetch(
     return fetch
 
 
+# ---------------------------------------------------------------------------
+# LAN-only mode — synthesize a tailscale-status shape from explicit hosts
+# ---------------------------------------------------------------------------
+
+
+def synthesize_lan_status(
+    peer_hosts: list[str],
+    *,
+    specialist_tag: str = DEFAULT_SPECIALIST_TAG,
+) -> dict:
+    """Build a fake `tailscale status --json` dict from an explicit peer list.
+
+    This is the seam that lets `slancha-mesh discover --peer 10.0.0.5 --peer
+    10.0.0.6` work without Tailscale on the box — the LocalLLaMA / homelab
+    happy path where every node is on the same LAN and the network itself
+    is the trust boundary. Every host is emitted as an Online peer carrying
+    `specialist_tag`, so the rest of the discovery pipeline
+    (`parse_specialist_peers` → `discover_specialists`) walks them
+    identically to a real tailnet.
+
+    The synthesized status has NO `Self` entry — the local node should
+    advertise itself by adding `localhost` (or its LAN IP) to `peer_hosts`
+    explicitly. That matches the realistic shape: the CLI doesn't know if
+    "this box" is also one of the serving peers and shouldn't guess.
+
+    Empty list → an empty Peer map; `discover_specialists` will return
+    zero reachable / zero unreachable nodes, which is the honest answer.
+    """
+    return {
+        "Peer": {
+            f"lan-{idx}": {
+                "DNSName": host,
+                "Online": True,
+                "Tags": [specialist_tag],
+            }
+            for idx, host in enumerate(peer_hosts)
+        }
+    }
+
+
 __all__ = [
     "DEFAULT_NODE_INFO_PORT",
+    "DEFAULT_SPECIALIST_TAG",
     "DiscoveredSpecialist",
     "DiscoveryResult",
     "FetchFn",
@@ -314,4 +355,5 @@ __all__ = [
     "make_http_fetch",
     "parse_specialist_peers",
     "pin_host",
+    "synthesize_lan_status",
 ]
