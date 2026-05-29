@@ -38,9 +38,14 @@ token. Tailnet membership + the ACL is the credential.
 
 Each node *does* keep a registry — but a local one, filled by its own
 heartbeat loop and served on its `/models` endpoint. A central, cross-node
-registry is optional: it appears only when you mount `mesh.service` into
-slancha-api ([Wire to slancha-api](#wire-to-slancha-api)). Contributor
-walkthrough: `NODE_SETUP.md`.
+registry is **optional** (the *push* model): run it standalone with the
+[`docker/`](docker/docker-compose.yml) image, or mount `mesh.service` into
+slancha-api ([Wire to slancha-api](#wire-to-slancha-api)). One gotcha — the
+per-node `/models` endpoint and the central registry **both default to
+`:8088`** but mean opposite things (a node's own self-description vs. one
+shared store that nodes push to), so don't point a pull consumer at a push
+registry; pick one model per deployment. Contributor walkthrough:
+`NODE_SETUP.md`.
 
 ## What ships (current state)
 
@@ -50,7 +55,7 @@ walkthrough: `NODE_SETUP.md`.
 | **`mesh/cli.py`** | **v0.0.7** | `slancha-mesh` CLI: `up` / `discover` / `status` / `serve` |
 | **`mesh/discovery.py`** | **v0.0.7** | Pull discovery: walk tailnet → routes, host-pinned `node_url` |
 | **`mesh/node_server.py`** | **v0.0.7** | `build_node()` — daemon + self-description app share one registry |
-| `mesh/catalog/*.toml` | v0.0.2 | 6 specialist cards (5 tier-1+2 + 1 backed by real cached weights) |
+| `mesh/catalog/*.toml` | v0.0.2 | 6 specialist cards; only `qwen3-coder-30b-a3b-fp8` is bring-up-validated on real hardware — the others are config-complete but unproven-servable |
 | `mesh/allocator.py` | v0.0.1 | `model_fit_score` + 3 cluster strategies |
 | `mesh/registry.py` | v0.0.1 | Event-sourced; in-memory; deterministic replay |
 | `mesh/select.py` | v0.0.1 | `select_mesh_route` with route_class + cloud fallback |
@@ -81,7 +86,11 @@ uv run python -m mesh.serve --specialist qwen3-coder-30b-a3b-fp8
 
 The v0.0.2 bring-up surfaced the FP8 kernel coverage gap on GB10
 (Blackwell sm_121) and the Marlin weight-only fall-back path; see the
-commit history for details.
+commit history for details. Practical consequence: the FP8 flagship card
+isn't always a clean `vllm serve` on a GB10. To exercise the mesh/serving
+plumbing without fighting the kernel gap (or OOMing a shared box), serve a
+small cached model under the catalog's `--served-model-name` — routing,
+discovery, and the backend lifecycle are model-agnostic.
 
 ## Backend support
 
@@ -134,8 +143,8 @@ cache or downloadable by `huggingface-cli download`. See
 
 ### Wire to slancha-api
 
-This is the optional **central** registry mode — the standalone mesh above is
-pull-only and needs none of it. `mesh/registry.py` exposes the FastAPI
+This is one of the optional **central**-registry (push) modes — the standalone
+mesh above is pull-only and needs none of it. `mesh/registry.py` exposes the FastAPI
 request/response shapes (`HeartbeatPostRequest`, `RegistryGetResponse`). Import
 on slancha-api and wrap a `MeshRegistry` instance behind
 `POST /mesh/v1/heartbeat` + `GET /mesh/v1/registry`.
