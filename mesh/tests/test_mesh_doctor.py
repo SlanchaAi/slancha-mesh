@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import types
 
 import httpx
 
@@ -10,19 +11,24 @@ from mesh.scripts.mesh_doctor import (
     CheckResult,
     DoctorReport,
     NODE_ID_ENV,
+    NODE_INFO_PORT,
     NODE_TOKEN_ENV,
     REGISTRY_URL_ENV,
     check_model_port_acl_reachable,
     check_node_token_env,
     check_nvidia_smi,
     check_port_listener,
+    check_recommended_engine_installed,
     check_registry_health,
     check_registry_lists_this_node,
     check_registry_url_env,
+    check_router_reachable,
     check_systemd_unit,
+    check_tailnet_specialist_ready,
     render_json,
     render_text,
     run_doctor,
+    run_node_doctor,
 )
 
 
@@ -337,3 +343,132 @@ def test_render_fixes_skips_checks_without_fix_field():
     rep.append(CheckResult(id="x", status="warn", detail="no fix here", fix=""))
     rep.finalize()
     assert render_fixes(rep) == ""
+
+
+# ---------------------------------------------------------------------------
+# Pull/tailnet node-doctor checks (the `slancha-mesh doctor` surface).
+# These hit external probes via call-time local imports, so we monkeypatch
+# the source modules (mesh.tailnet / mesh.probe / mesh.engine_select /
+# mesh.router_bootstrap).
+# ---------------------------------------------------------------------------
+
+
+def test_check_tailnet_specialist_ready_skip_when_no_tailnet(monkeypatch):
+    monkeypatch.setattr("mesh.tailnet.tailnet_status", lambda cfg: None)
+    r = check_tailnet_specialist_ready()
+    assert r.status == "skip"
+
+
+def test_check_tailnet_specialist_ready_pass_when_online_and_tagged(monkeypatch):
+    monkeypatch.setattr(
+        "mesh.tailnet.tailnet_status",
+        lambda cfg: {"Self": {"Online": True, "Tags": ["tag:specialist"], "DNSName": "n.ts.net."}},
+    )
+    r = check_tailnet_specialist_ready()
+    assert r.status == "pass"
+    assert "n.ts.net" in r.detail
+
+
+def test_check_tailnet_specialist_ready_fail_when_offline(monkeypatch):
+    monkeypatch.setattr(
+        "mesh.tailnet.tailnet_status",
+        lambda cfg: {"Self": {"Online": False, "Tags": ["tag:specialist"]}},
+    )
+    r = check_tailnet_specialist_ready()
+    assert r.status == "fail"
+    assert "offline" in r.detail
+
+
+def test_check_tailnet_specialist_ready_fail_when_tag_missing(monkeypatch):
+    monkeypatch.setattr(
+        "mesh.tailnet.tailnet_status",
+        lambda cfg: {"Self": {"Online": True, "Tags": ["tag:other"]}},
+    )
+    r = check_tailnet_specialist_ready()
+    assert r.status == "fail"
+    assert r.fix  # tells you to re-join tagged
+
+
+def test_check_recommended_engine_pass_when_installed(monkeypatch):
+    monkeypatch.setattr("mesh.probe.probe_node", lambda: types.SimpleNamespace(available_backends=["vllm"]))
+    monkeypatch.setattr(
+        "mesh.engine_select.recommend_engine",
+        lambda probe: types.SimpleNamespace(installed=True, backend="vllm", quant="fp8", rationale="fits"),
+    )
+    r = check_recommended_engine_installed()
+    assert r.status == "pass"
+    assert "vllm" in r.detail
+
+
+def test_check_recommended_engine_warn_when_missing(monkeypatch):
+    monkeypatch.setattr("mesh.probe.probe_node", lambda: types.SimpleNamespace(available_backends=[]))
+    monkeypatch.setattr(
+        "mesh.engine_select.recommend_engine",
+        lambda probe: types.SimpleNamespace(installed=False, backend="llamacpp", quant="gguf-q4", rationale="cpu node"),
+    )
+    r = check_recommended_engine_installed()
+    assert r.status == "warn"
+    assert "llamacpp" in r.fix
+
+
+def test_check_router_reachable_pass_with_gateway_peer(monkeypatch):
+    monkeypatch.setattr("mesh.tailnet.tailnet_status", lambda cfg: {})
+    monkeypatch.setattr(
+        "mesh.router_bootstrap.detect_router",
+        lambda status: types.SimpleNamespace(gateway_peer=True, on_path=False),
+    )
+    r = check_router_reachable()
+    assert r.status == "pass"
+
+
+def test_check_router_reachable_warn_when_local_only(monkeypatch):
+    monkeypatch.setattr("mesh.tailnet.tailnet_status", lambda cfg: {})
+    monkeypatch.setattr(
+        "mesh.router_bootstrap.detect_router",
+        lambda status: types.SimpleNamespace(gateway_peer=False, on_path=True),
+    )
+    r = check_router_reachable()
+    assert r.status == "warn"
+    assert r.fix
+
+
+def test_check_router_reachable_warn_when_no_router(monkeypatch):
+    monkeypatch.setattr("mesh.tailnet.tailnet_status", lambda cfg: None)
+    monkeypatch.setattr(
+        "mesh.router_bootstrap.detect_router",
+        lambda status: types.SimpleNamespace(gateway_peer=False, on_path=False),
+    )
+    r = check_router_reachable()
+    assert r.status == "warn"
+
+
+def test_run_node_doctor_assembles_expected_checks(monkeypatch):
+    import platform
+
+    monkeypatch.setattr("mesh.tailnet.tailnet_status", lambda cfg: None)
+    monkeypatch.setattr(
+        "mesh.router_bootstrap.detect_router",
+        lambda status: types.SimpleNamespace(gateway_peer=False, on_path=False),
+    )
+    monkeypatch.setattr("mesh.probe.probe_node", lambda: types.SimpleNamespace(available_backends=[]))
+    monkeypatch.setattr(
+        "mesh.engine_select.recommend_engine",
+        lambda probe: types.SimpleNamespace(installed=True, backend="vllm", quant="fp8", rationale="x"),
+    )
+    monkeypatch.setattr("mesh.scripts.mesh_doctor._port_has_listener", lambda p: False)
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.delenv(NODE_TOKEN_ENV, raising=False)
+
+    report = run_node_doctor()
+    assert isinstance(report, DoctorReport)
+    ids = {c.id for c in report.checks}
+    assert {
+        "tailnet.specialist_ready",
+        "engine.installed",
+        "router.reachable",
+        "ports.model_acl",
+        f"ports.{NODE_INFO_PORT}",
+    } <= ids
+    # tailnet skip + engine pass + router warn + model_acl skip + nvidia skip +
+    # token warn + port warn → warnings, no failures.
+    assert report.verdict == "warnings"
