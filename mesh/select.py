@@ -16,7 +16,6 @@ so the caller knows to defer to slancha-cloud.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from mesh.models import (
@@ -105,6 +104,35 @@ def _filter_routes(
     return out
 
 
+def _candidate_routes(
+    domain: str,
+    difficulty: str,
+    snapshot: RegistrySnapshot,
+) -> list[Route]:
+    """Candidate routes for (domain, difficulty), with spec §6 fall-through.
+
+    Difficulty fall-through: a specialist that handles 'hard' can usually
+    handle 'medium'/'easy', so an empty tier falls through to harder tiers.
+    Domain fall-through: a domain-specific miss falls through to `general`.
+
+    Single-sourced so the base and pref selectors apply identical routing
+    policy and cannot drift. Snapshot's `ranked_routes` is used if populated,
+    else built on the fly so callers that pass raw snapshots still work.
+    """
+    ranked = snapshot.ranked_routes
+    if not ranked:
+        ranked = build_ranked_routes(snapshot)
+
+    candidates = list(ranked.get(f"{domain}|{difficulty}", []))
+    if not candidates and difficulty == "easy":
+        candidates = list(ranked.get(f"{domain}|medium", []))
+    if not candidates and difficulty in ("easy", "medium"):
+        candidates = list(ranked.get(f"{domain}|hard", []))
+    if not candidates and domain != "general":
+        candidates = list(ranked.get(f"general|{difficulty}", []))
+    return candidates
+
+
 def select_mesh_route(
     signals: ClassifierSignals,
     registry_snapshot: RegistrySnapshot,
@@ -126,24 +154,7 @@ def select_mesh_route(
     """
     domain = _domain_for_signals(signals)
     difficulty = signals.difficulty.lower().strip()
-    key = f"{domain}|{difficulty}"
-
-    ranked = registry_snapshot.ranked_routes
-    if not ranked:
-        ranked = build_ranked_routes(registry_snapshot)
-
-    candidates = list(ranked.get(key, []))
-
-    # Difficulty fall-through: if no routes at this tier, try harder tiers
-    # (a specialist that handles 'hard' can usually handle 'medium').
-    if not candidates and difficulty == "easy":
-        candidates = list(ranked.get(f"{domain}|medium", []))
-    if not candidates and difficulty in ("easy", "medium"):
-        candidates = list(ranked.get(f"{domain}|hard", []))
-
-    # Domain fall-through: try `general` if domain-specific had nothing.
-    if not candidates and domain != "general":
-        candidates = list(ranked.get(f"general|{difficulty}", []))
+    candidates = _candidate_routes(domain, difficulty, registry_snapshot)
 
     filtered = _filter_routes(candidates, signals.route_class, max_queue_ms)
     if not filtered:
@@ -377,20 +388,7 @@ def select_mesh_route_with_pref(
 
     domain = _domain_for_signals(signals)
     difficulty = signals.difficulty.lower().strip()
-    key = f"{domain}|{difficulty}"
-
-    ranked = registry_snapshot.ranked_routes
-    if not ranked:
-        ranked = build_ranked_routes(registry_snapshot)
-
-    candidates = list(ranked.get(key, []))
-    # Same difficulty + domain fall-through as the base selector.
-    if not candidates and difficulty == "easy":
-        candidates = list(ranked.get(f"{domain}|medium", []))
-    if not candidates and difficulty in ("easy", "medium"):
-        candidates = list(ranked.get(f"{domain}|hard", []))
-    if not candidates and domain != "general":
-        candidates = list(ranked.get(f"general|{difficulty}", []))
+    candidates = _candidate_routes(domain, difficulty, registry_snapshot)
 
     # Base route-class + queue filter.
     base_filtered = _filter_routes(candidates, signals.route_class, max_queue_ms)
@@ -492,9 +490,3 @@ __all__ = [
     "select_mesh_route",
     "select_mesh_route_with_pref",
 ]
-
-
-# Silence unused-import lint of math (kept for parity with slancha-api
-# _pareto_score which uses log2; if we add pareto-mode cost weighting
-# in v0.0.2 we'll need it).
-_ = math
