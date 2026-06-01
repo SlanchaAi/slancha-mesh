@@ -50,7 +50,12 @@ promotion + rollback — not the generational loop — is the defensible part.
    `MeshUsageEvent`, and the axolotl FT-bundle row are all *projections* of it.
 5. **The holdout gate is the single promotion guard** — for retrained heads
    *and* new specialists. Nothing reaches traffic without a held-out
-   non-regression against a **curated, trusted** seed set.
+   non-regression against a **curated, trusted** seed set. The full set of
+   invariants the gate must obey is the [`GATE-CONTRACT.md`](GATE-CONTRACT.md)
+   — best-so-far · per-axis non-regression · stub-reject · min-n · judge-match ·
+   frozen-holdout governor · sustained-gain hysteresis · cloud spot-check ·
+   rollback. (Co-authored with a second, independently-built self-improving loop
+   that converged on the same gate — strong validation it's the right invariant.)
 
 ## The loop
 
