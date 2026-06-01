@@ -15,8 +15,6 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
-
 from mesh.eval.gate import GateThresholds
 from mesh.loop_runner import (
     CIRCUIT_BREAKER_THRESHOLD,
@@ -326,7 +324,7 @@ def test_gate_verdict_recorded_as_decision(tmp_path):
     runner = _runner(tmp_path, execute)
     write_queue(runner.queue_path, [_train_spec("t1")])
     runner.run_once()
-    decisions = [json.loads(l) for l in
+    decisions = [json.loads(line) for line in
                  (tmp_path / "decisions.jsonl").read_text().splitlines()]
     verdicts = [d for d in decisions if d["kind"] == "gate_verdict"]
     assert len(verdicts) == 1
@@ -387,7 +385,7 @@ def test_circuit_breaker_trips_after_five_fast_fails(tmp_path):
     assert runner.run_once() == "paused"
 
     # breaker recorded a non-blocking decision item
-    decisions = [json.loads(l) for l in
+    decisions = [json.loads(line) for line in
                  (tmp_path / "decisions.jsonl").read_text().splitlines()]
     assert any(d["kind"] == "circuit_breaker" for d in decisions)
 
