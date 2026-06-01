@@ -142,6 +142,20 @@ def recommend_engine(probe: NodeProbe, *, os_name: str | None = None) -> EngineR
             ("llamacpp", "vllm"),
         )
 
+    # Windows + non-NVIDIA GPU (AMD/Radeon). There's no CUDA here, but Ollama
+    # uses the AMD GPU on Windows (DirectML/ROCm path), so this beats CPU-only.
+    # `gpu_vendor` is set by the probe when nvidia-smi found nothing but a WMI
+    # adapter scan found AMD. NVIDIA still goes through the cuda_capability
+    # branch above; this is strictly the non-CUDA-GPU case.
+    if os_name == "Windows" and probe.gpu_vendor:
+        return rec(
+            "ollama", "gguf-q4",
+            f"Windows + {probe.gpu_vendor.upper()} GPU ({probe.chip}): no CUDA, but "
+            "Ollama uses the GPU on Windows (DirectML/ROCm) — better than CPU. "
+            "vLLM is Linux/WSL + NVIDIA-only.",
+            ("llamacpp",),
+        )
+
     # No CUDA → CPU inference.
     return rec(
         "llamacpp", "gguf-q4-cpu",

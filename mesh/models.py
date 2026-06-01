@@ -54,6 +54,10 @@ class NodeProbe(_Frozen):
     chip: str
     arch: Arch
     cuda_capability: str | None = None
+    # GPU vendor when a non-NVIDIA accelerator is detected (e.g. "amd" on a
+    # Windows + Radeon box). cuda_capability is NVIDIA-only; this is the signal
+    # the engine selector uses to route non-CUDA GPUs (Ollama can use them).
+    gpu_vendor: str | None = None
     fp4_tops: float | None = None
     fp16_tops: float | None = None
 

@@ -57,6 +57,28 @@ def test_windows_nvidia_picks_ollama_not_vllm():
     assert "vllm" in rec.rationale.lower()
 
 
+def test_windows_amd_gpu_picks_ollama_not_cpu():
+    # Issue #63: Windows + AMD GPU (no CUDA) — Ollama uses the AMD GPU on
+    # Windows, so it must beat the CPU/llama.cpp fallback.
+    rec = recommend_engine(_probe(
+        arch="x86_64", chip="AMD Radeon RX 7900 XTX",
+        cuda_capability=None, gpu_vendor="amd",
+    ), os_name="Windows")
+    assert rec.backend == "ollama"
+    assert rec.quant != "gguf-q4-cpu"  # not the CPU-only fallback
+    assert "amd" in rec.rationale.lower()
+
+
+def test_non_windows_amd_gpu_still_cpu_fallback():
+    # gpu_vendor is set but the box is Linux — without a Linux ROCm path wired
+    # in, this stays on the CPU fallback (the new branch is Windows-gated).
+    rec = recommend_engine(_probe(
+        arch="x86_64", chip="AMD Radeon RX 7900 XTX",
+        cuda_capability=None, gpu_vendor="amd",
+    ), os_name="Linux")
+    assert rec.quant == "gguf-q4-cpu"
+
+
 def test_windows_cpu_picks_gguf():
     rec = recommend_engine(_probe(arch="x86_64", chip="intel", cuda_capability=None), os_name="Windows")
     assert rec.backend in ("ollama", "llamacpp")

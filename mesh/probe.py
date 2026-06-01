@@ -125,6 +125,47 @@ def _detect_cuda_capability(warnings: list[str]) -> str | None:
     return None
 
 
+def _detect_amd_gpu(warnings: list[str]) -> str | None:
+    """Best-effort AMD/Radeon GPU name on Windows. None if none found.
+
+    NVIDIA exposes itself via nvidia-smi (handled in `_detect_chip` /
+    `_detect_cuda_capability`); AMD does not, so a Windows + Radeon box would
+    otherwise look CPU-only and get steered to CPU inference even though Ollama
+    can use the AMD GPU on Windows. We enumerate display adapters via WMI
+    (`wmic`, then PowerShell `Get-CimInstance` as a fallback for newer Windows
+    where wmic is deprecated) and return the first AMD/Radeon adapter name.
+
+    Windows-only and only meaningful when nvidia-smi found nothing; callers
+    gate accordingly. Never raises (uses `_run`).
+    """
+    if platform.system() != "Windows":
+        return None
+
+    out = _run(["wmic", "path", "win32_VideoController", "get", "name"])
+    if not out.strip():
+        # wmic is removed on some Windows 11 builds — try PowerShell/CIM.
+        out = _run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | "
+                "Select-Object -ExpandProperty Name",
+            ]
+        )
+
+    for line in out.splitlines():
+        name = line.strip()
+        if not name or name.lower() == "name":  # wmic header row
+            continue
+        low = name.lower()
+        if "amd" in low or "radeon" in low:
+            return name
+
+    warnings.append("no AMD/Radeon display adapter found via wmic/CIM")
+    return None
+
+
 def _detect_memory_gb(warnings: list[str]) -> tuple[float, float]:
     """Return (ram_total_gb, ram_available_gb). Cross-OS via psutil.
 
@@ -312,6 +353,18 @@ def probe_node(
     ram_total, ram_avail = _detect_memory_gb(warnings)
     vram_total, vram_avail, unified = _detect_vram_gb(warnings)
 
+    # Windows + non-NVIDIA GPU: nvidia-smi found nothing, so `chip` is the CPU
+    # brand and cuda_capability is None. Best-effort detect an AMD/Radeon
+    # adapter so the engine selector can route to Ollama (it uses the AMD GPU
+    # on Windows) instead of the CPU fallback. cuda_capability stays None —
+    # this is NOT a CUDA GPU; we surface the vendor via `gpu_vendor` instead.
+    gpu_vendor: str | None = None
+    if cuda_cap is None:
+        amd_name = _detect_amd_gpu(warnings)
+        if amd_name:
+            gpu_vendor = "amd"
+            chip = amd_name  # CPU brand would otherwise be reported
+
     # GB10 is unified memory even though nvidia-smi reports VRAM normally
     # on some driver releases. Detect by chip name as a safety net.
     if "GB10" in chip:
@@ -338,6 +391,7 @@ def probe_node(
         chip=chip,
         arch=arch,  # type: ignore[arg-type]
         cuda_capability=cuda_cap,
+        gpu_vendor=gpu_vendor,
         fp4_tops=fp4,
         fp16_tops=fp16,
         ram_total_gb=round(ram_total, 2),
