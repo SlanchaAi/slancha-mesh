@@ -282,6 +282,30 @@ def _passes_capability_gate(card: SpecialistCard | None, required: list[str]) ->
     return all(c in have for c in required)
 
 
+def _reject_unsupported_pref(pref: PrefVector) -> None:
+    """Fail loud on pref fields the selector cannot honor (#56).
+
+    The router ranks `Route`s, and a `Route` carries only p95 latency
+    (`p95_latency_ms`) and queue time — there is no per-route TTFT and no
+    per-route measured throughput (`build_ranked_routes` never propagates a
+    node's `estimated_tps`). Honoring `max_ttft_ms` / `min_throughput_tps`
+    would mean silently reusing p95 as TTFT or inventing a throughput
+    number, so instead we refuse early with a clear error rather than let a
+    caller believe a ceiling was applied when it wasn't. The other two
+    fields (`allow_fallbacks`, `require_streaming`) ARE honored downstream.
+    """
+    if pref.max_ttft_ms is not None:
+        raise ValueError(
+            "PrefVector.max_ttft_ms is not supported: no per-route TTFT is "
+            "measured (routes carry p95 latency only)."
+        )
+    if pref.min_throughput_tps is not None:
+        raise ValueError(
+            "PrefVector.min_throughput_tps is not supported: no per-route "
+            "throughput is measured."
+        )
+
+
 def _pref_filter(
     routes: list[Route],
     catalog: dict[SpecialistId, SpecialistCard],
@@ -306,6 +330,13 @@ def _pref_filter(
             card = catalog.get(r.specialist_id)
             if not _passes_capability_gate(card, pref.require_capabilities):
                 drops.append((r, f"missing capability {pref.require_capabilities}"))
+                continue
+        if pref.require_streaming:
+            # Streaming is published as the "streaming" capability on the
+            # specialist card (the OpenAI-compat backends stream natively).
+            card = catalog.get(r.specialist_id)
+            if not _passes_capability_gate(card, ["streaming"]):
+                drops.append((r, "missing capability ['streaming']"))
                 continue
         if pref.min_context_window is not None:
             card = catalog.get(r.specialist_id)
@@ -383,8 +414,17 @@ def select_mesh_route_with_pref(
             signals, registry_snapshot, max_queue_ms, cloud_fallback_model
         )
 
+    # Reject pref fields we cannot honor with the data routes carry (#56),
+    # before any routing work — so a caller never believes a ceiling applied
+    # when it silently didn't.
+    _reject_unsupported_pref(pref)
+
     if admin_ceiling:
         pref = _clamp_pref_with_ceiling(pref, admin_ceiling)
+
+    # allow_fallbacks=False suppresses the trailing cloud entry (the mesh
+    # must serve the request or it fails); default/True keeps it.
+    include_cloud = pref.allow_fallbacks is not False
 
     domain = _domain_for_signals(signals)
     difficulty = signals.difficulty.lower().strip()
@@ -411,7 +451,7 @@ def select_mesh_route_with_pref(
             ),
             queue_ms_estimated=0,
             cluster_coverage_used=False,
-            fallback_chain=[(cloud_fallback_model, None)],
+            fallback_chain=[(cloud_fallback_model, None)] if include_cloud else [],
             decision_reason_structured={
                 "winner": cloud_fallback_model,
                 "alternatives_considered": [
@@ -440,7 +480,8 @@ def select_mesh_route_with_pref(
     fallback_chain: list[tuple[ModelId, NodeId | None]] = [
         (_model_id_for(r, registry_snapshot), r.node_id) for r, _, _ in losers
     ]
-    fallback_chain.append((cloud_fallback_model, None))
+    if include_cloud:
+        fallback_chain.append((cloud_fallback_model, None))
 
     structured = {
         "winner": winner_route.specialist_id,
