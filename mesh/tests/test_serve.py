@@ -441,24 +441,89 @@ def test_daemon_routes_around_queue_full():
     daemon.stop()
 
 
-def test_build_backend_falls_back_to_null_for_unsupported_backend():
-    """`llamacpp` / `mlx` cards aren't yet wired; should not crash the daemon."""
+def test_build_backend_llamacpp_without_gguf_falls_back_to_null():
+    """A `llamacpp` card missing `gguf_path` falls back to NullBackend with a
+    hint, so a mixed catalog still boots (mirrors the ollama_tag-missing path).
+    """
     card = SpecialistCard(
         model_id="test/llama",
         specialist_id="llama-test",
         domain="general",
         difficulty_tiers=["easy"],
-        required_backend="llamacpp",  # not yet wired — see backends.py
+        required_backend="llamacpp",  # wired, but needs gguf_path
         storage_gb=4.0,
         runtime_gb=6.0,
         min_vram_gb=8.0,
         context_window=8192,
         n_layers=32,
         estimated_tps_at={"gb10": 50.0},
+        # gguf_path intentionally unset
     )
     be = build_backend(card, port=9001)
     assert be.name == "null"
     assert be.card.specialist_id == "llama-test"
+
+
+def test_build_backend_llamacpp_with_gguf_returns_llamacpp_backend():
+    """A `llamacpp` card with `gguf_path` set wires to LlamaCppBackend."""
+    card = SpecialistCard(
+        model_id="test/llama",
+        specialist_id="llama-test",
+        domain="general",
+        difficulty_tiers=["easy"],
+        required_backend="llamacpp",
+        storage_gb=4.0,
+        runtime_gb=6.0,
+        min_vram_gb=8.0,
+        context_window=8192,
+        n_layers=32,
+        estimated_tps_at={"gb10": 50.0},
+        gguf_path="/models/llama.gguf",
+    )
+    be = build_backend(card, port=9001)
+    assert be.name == "llamacpp"
+    assert be.base_url == "http://127.0.0.1:9001"
+
+
+def test_build_backend_mlx_without_repo_falls_back_to_null():
+    """An `mlx` card missing `mlx_repo` falls back to NullBackend with a hint."""
+    card = SpecialistCard(
+        model_id="test/qwen",
+        specialist_id="qwen-mlx-test",
+        domain="general",
+        difficulty_tiers=["easy"],
+        required_backend="mlx",
+        storage_gb=4.0,
+        runtime_gb=6.0,
+        min_vram_gb=8.0,
+        context_window=8192,
+        n_layers=32,
+        estimated_tps_at={"m4_pro": 50.0},
+        # mlx_repo intentionally unset
+    )
+    be = build_backend(card, port=9002)
+    assert be.name == "null"
+
+
+def test_build_backend_mlx_with_repo_returns_mlx_backend():
+    """An `mlx` card with `mlx_repo` set wires to MLXBackend (no process spawned)."""
+    card = SpecialistCard(
+        model_id="test/qwen",
+        specialist_id="qwen-mlx-test",
+        domain="general",
+        difficulty_tiers=["easy"],
+        required_backend="mlx",
+        storage_gb=4.0,
+        runtime_gb=6.0,
+        min_vram_gb=8.0,
+        context_window=8192,
+        n_layers=32,
+        estimated_tps_at={"m4_pro": 50.0},
+        mlx_repo="mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+    )
+    be = build_backend(card, port=9002)
+    assert be.name == "mlx"
+    assert be.base_url == "http://127.0.0.1:9002"
 
 
 def test_build_backend_ollama_route_with_tag_returns_ollama_backend():

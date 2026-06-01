@@ -4,13 +4,16 @@ A `BaseBackend` knows how to (a) spawn a process that serves a
 specialist over an OpenAI-compatible HTTP endpoint, (b) report
 liveness + basic utilization, and (c) terminate cleanly.
 
-Today ships `VLLMBackend`, `OllamaBackend`, and a `NullBackend` for tests.
+Today ships `VLLMBackend`, `OllamaBackend`, `LlamaCppBackend`,
+`MLXBackend`, and a `NullBackend` for tests.
 The Ollama path is what unlocks every LocalLLaMA-style box (Mac, AMD,
 Windows, small consumer NVIDIA) that the catalog's vLLM-only cards
 silently exclude — `OllamaBackend` adopts the user's running Ollama
 daemon and serves any specialist whose card sets `ollama_tag`.
-`LlamaCppBackend` is sketched but not wired — set `gguf_path` on a card
-and serve directly through Ollama in the meantime.
+`LlamaCppBackend` owns a `llama-server` subprocess for any box with a
+GGUF (`gguf_path`) — the CPU-only / no-CUDA-no-Metal path. `MLXBackend`
+owns an `mlx_lm.server` subprocess on Apple Silicon (`mlx_repo`) for
+native Metal acceleration.
 
 Why this split? Two reasons:
   1. The mesh router only cares about `node_url` + heartbeat. A clean
@@ -27,6 +30,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -596,6 +600,379 @@ class OllamaBackend:
 
 
 # ---------------------------------------------------------------------------
+# llama.cpp (llama-server)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LlamaCppBackend:
+    """llama.cpp's `llama-server` subprocess. OpenAI-compatible on `base_url`/v1.
+
+    Same own-the-subprocess shape as `VLLMBackend`: `start()` forks
+    `llama-server -m <gguf> --port <port> --host <host>` and returns; the
+    server exposes `/v1/chat/completions` + `/health` (200 once weights are
+    loaded). If the port is already bound (a llama-server launched manually
+    for warmup), we adopt it via PID lookup so `stop()` still works.
+
+    The model is a GGUF named by `card.gguf_path` — a local path or a
+    `repo:file` HF identifier that llama-server can fetch. Missing → a clear
+    error (mirrors OllamaBackend's `ollama_tag` requirement); `build_backend`
+    catches the missing field up front and falls back to NullBackend.
+
+    llama.cpp is the CPU-only / small-box path the planner recommends when
+    there's no CUDA and no Apple Metal — it runs anywhere a GGUF + a CPU do.
+    """
+
+    card: SpecialistCard
+    host: str = "127.0.0.1"
+    port: int = 8001
+    n_gpu_layers: int = 0  # 0 = CPU-only; bump for partial GPU offload
+    log_path: Path | None = None
+    extra_args: list[str] = field(default_factory=list)
+
+    name: str = "llamacpp"
+    _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
+    _adopted_pid: int | None = field(default=None, init=False, repr=False)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    @property
+    def health_url(self) -> str:
+        return f"{self.base_url}/health"
+
+    def start(self) -> None:
+        """Spawn `llama-server -m <gguf>`. Skips if already up; adopts a busy port.
+
+        Like vLLM, this is non-blocking — use `wait_ready()` to block until
+        `/health` returns 200. Requires `card.gguf_path`; raises otherwise.
+        """
+        if self.card.gguf_path is None:
+            raise RuntimeError(
+                f"llama.cpp backend needs `gguf_path` on specialist card "
+                f"{self.card.specialist_id!r} (a local GGUF path or a "
+                f"'repo:file' HF identifier). Set it in the card TOML and re-run."
+            )
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        if self._port_in_use():
+            self._adopted_pid = _find_pid_on_port(self.port)
+            if self._adopted_pid:
+                return
+            raise RuntimeError(
+                f"Port {self.port} already bound but no PID found; refusing to launch."
+            )
+
+        cmd = [
+            shutil.which("llama-server") or "llama-server",
+            "-m",
+            self.card.gguf_path,
+            "--host",
+            self.host,
+            "--port",
+            str(self.port),
+            "--n-gpu-layers",
+            str(self.n_gpu_layers),
+        ]
+        cmd.extend(self.extra_args)
+
+        env = os.environ.copy()
+        log_file = open(self.log_path, "ab") if self.log_path else None
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=log_file or subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # so SIGTERM hits the whole group
+            )
+        finally:
+            # Close the parent's copy of the log fd even if Popen raised
+            # (e.g. llama-server not on PATH), so we don't leak a descriptor.
+            if log_file is not None:
+                log_file.close()
+
+    def wait_ready(self, timeout: float = 600.0) -> bool:
+        """Poll /health until 200 or timeout. GGUF loads are usually under a minute."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self.is_alive():
+                return False
+            try:
+                r = httpx.get(self.health_url, timeout=2.0)
+                if r.status_code == 200:
+                    return True
+            except (httpx.HTTPError, OSError):
+                pass
+            time.sleep(2.0)
+        return False
+
+    def is_alive(self) -> bool:
+        if self._proc is not None:
+            return self._proc.poll() is None
+        if self._adopted_pid is not None:
+            try:
+                os.kill(self._adopted_pid, 0)
+                return True
+            except OSError:
+                return False
+        return self._port_in_use()
+
+    def stop(self, timeout: float = 30.0) -> None:
+        """SIGTERM the process group then SIGKILL on timeout. Idempotent."""
+        target_pid: int | None = None
+        if self._proc is not None and self._proc.poll() is None:
+            target_pid = self._proc.pid
+        elif self._adopted_pid is not None:
+            target_pid = self._adopted_pid
+        if target_pid is None:
+            return
+        try:
+            os.killpg(os.getpgid(target_pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                os.kill(target_pid, 0)
+            except OSError:
+                self._proc = None
+                self._adopted_pid = None
+                return
+            time.sleep(0.5)
+        try:
+            os.killpg(os.getpgid(target_pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        self._proc = None
+        self._adopted_pid = None
+
+    def utilization(self) -> dict:
+        """Best-effort util via `/health`. llama-server publishes no queue gauge.
+
+        Newer llama-server `/health` returns a JSON body with a `slots_idle`
+        /`slots_processing` split when launched with `--metrics`; we surface
+        `running` from it when present and otherwise fall back to zeros, never
+        raising into the heartbeat path.
+        """
+        out = {"queue_depth": 0, "running": 0}
+        try:
+            r = httpx.get(self.health_url, timeout=2.0)
+            if r.status_code != 200:
+                return out
+            data = r.json()
+        except (httpx.HTTPError, OSError, ValueError):
+            return out
+        if isinstance(data, dict):
+            processing = data.get("slots_processing")
+            if isinstance(processing, (int, float)):
+                out["running"] = int(processing)
+        return out
+
+    def _port_in_use(self) -> bool:
+        import socket as _s
+
+        with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as sock:
+            sock.settimeout(0.3)
+            try:
+                sock.connect((self.host, self.port))
+                return True
+            except (ConnectionRefusedError, OSError):
+                return False
+
+
+# ---------------------------------------------------------------------------
+# MLX (mlx_lm.server) — Apple Silicon native
+# ---------------------------------------------------------------------------
+
+
+def _is_apple_silicon() -> bool:
+    """True iff we're on macOS / arm64 (Apple Metal). MLX needs both.
+
+    mlx_lm only runs on Apple Silicon; on any other platform the import
+    itself fails. We gate at the backend so a mixed catalog on a Linux box
+    degrades to a clear error rather than a confusing subprocess crash.
+    """
+    import platform
+
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+@dataclass
+class MLXBackend:
+    """`mlx_lm.server` subprocess on Apple Silicon. OpenAI-compatible on `base_url`/v1.
+
+    Own-the-subprocess shape: mlx_lm.server is launched per-model
+    (`python -m mlx_lm.server --model <repo> --port <port>`), so — like vLLM
+    and unlike Ollama — this backend spawns and owns its process. The server
+    serves `/v1/chat/completions` + `/v1/models`; we use `/v1/models` as the
+    readiness probe (mlx_lm.server exposes no dedicated `/health`).
+
+    The model is a HF repo named by `card.mlx_repo` (typically an
+    `mlx-community/...` repo). Missing → a clear error (mirrors OllamaBackend's
+    `ollama_tag`); `build_backend` catches it up front and falls back to
+    NullBackend.
+
+    Apple-only: `start()` refuses on non-Darwin/arm64 hosts so the failure is
+    a legible "MLX needs Apple Silicon" rather than a Python ImportError deep
+    in the child process.
+    """
+
+    card: SpecialistCard
+    host: str = "127.0.0.1"
+    port: int = 8001
+    log_path: Path | None = None
+    extra_args: list[str] = field(default_factory=list)
+
+    name: str = "mlx"
+    _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
+    _adopted_pid: int | None = field(default=None, init=False, repr=False)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    @property
+    def health_url(self) -> str:
+        # mlx_lm.server has no dedicated /health; /v1/models answers 200 once up.
+        return f"{self.base_url}/v1/models"
+
+    def start(self) -> None:
+        """Spawn `python -m mlx_lm.server --model <repo>`. Apple Silicon only.
+
+        Non-blocking — use `wait_ready()` to block on `/v1/models`. Requires
+        `card.mlx_repo` and a Darwin/arm64 host; raises a clear error otherwise.
+        Adopts an already-bound port like vLLM.
+        """
+        if not _is_apple_silicon():
+            raise RuntimeError(
+                f"MLX backend requires Apple Silicon (macOS / arm64); this host "
+                f"is not. Use an 'ollama' or 'llamacpp' card for specialist "
+                f"{self.card.specialist_id!r} on this platform."
+            )
+        if self.card.mlx_repo is None:
+            raise RuntimeError(
+                f"MLX backend needs `mlx_repo` on specialist card "
+                f"{self.card.specialist_id!r} (an mlx-community HF repo, e.g. "
+                f"'mlx-community/Qwen2.5-Coder-7B-Instruct-4bit'). Set it in the "
+                f"card TOML and re-run."
+            )
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        if self._port_in_use():
+            self._adopted_pid = _find_pid_on_port(self.port)
+            if self._adopted_pid:
+                return
+            raise RuntimeError(
+                f"Port {self.port} already bound but no PID found; refusing to launch."
+            )
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "mlx_lm.server",
+            "--model",
+            self.card.mlx_repo,
+            "--host",
+            self.host,
+            "--port",
+            str(self.port),
+        ]
+        cmd.extend(self.extra_args)
+
+        env = os.environ.copy()
+        log_file = open(self.log_path, "ab") if self.log_path else None
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=log_file or subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # so SIGTERM hits the whole group
+            )
+        finally:
+            # Close the parent's copy of the log fd even if Popen raised
+            # (e.g. python missing mlx_lm), so we don't leak a descriptor.
+            if log_file is not None:
+                log_file.close()
+
+    def wait_ready(self, timeout: float = 600.0) -> bool:
+        """Poll /v1/models until 200 or timeout. MLX weight loads are quick."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self.is_alive():
+                return False
+            try:
+                r = httpx.get(self.health_url, timeout=2.0)
+                if r.status_code == 200:
+                    return True
+            except (httpx.HTTPError, OSError):
+                pass
+            time.sleep(2.0)
+        return False
+
+    def is_alive(self) -> bool:
+        if self._proc is not None:
+            return self._proc.poll() is None
+        if self._adopted_pid is not None:
+            try:
+                os.kill(self._adopted_pid, 0)
+                return True
+            except OSError:
+                return False
+        return self._port_in_use()
+
+    def stop(self, timeout: float = 30.0) -> None:
+        """SIGTERM the process group then SIGKILL on timeout. Idempotent."""
+        target_pid: int | None = None
+        if self._proc is not None and self._proc.poll() is None:
+            target_pid = self._proc.pid
+        elif self._adopted_pid is not None:
+            target_pid = self._adopted_pid
+        if target_pid is None:
+            return
+        try:
+            os.killpg(os.getpgid(target_pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                os.kill(target_pid, 0)
+            except OSError:
+                self._proc = None
+                self._adopted_pid = None
+                return
+            time.sleep(0.5)
+        try:
+            os.killpg(os.getpgid(target_pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        self._proc = None
+        self._adopted_pid = None
+
+    def utilization(self) -> dict:
+        """mlx_lm.server publishes no util gauges; report zeros (alive iff up).
+
+        The registry treats a missing signal as "unknown, healthy", so a
+        flat zeros dict is the right floor — never raises into the heartbeat.
+        """
+        return {"queue_depth": 0, "running": 0}
+
+    def _port_in_use(self) -> bool:
+        import socket as _s
+
+        with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as sock:
+            sock.settimeout(0.3)
+            try:
+                sock.connect((self.host, self.port))
+                return True
+            except (ConnectionRefusedError, OSError):
+                return False
+
+
+# ---------------------------------------------------------------------------
 # Null backend (tests + registry-only nodes)
 # ---------------------------------------------------------------------------
 
@@ -628,6 +1005,8 @@ class NullBackend:
 __all__ = [
     "BaseBackend",
     "DEFAULT_OLLAMA_PORT",
+    "LlamaCppBackend",
+    "MLXBackend",
     "NullBackend",
     "OllamaBackend",
     "VLLMBackend",

@@ -85,16 +85,16 @@ serves today* vs. what's recommended. Pick the model size your VRAM fits.
 
 | Hardware | Real backend today | Notes |
 |---|---|---|
-| Apple Silicon Mac (e.g. 16GB) | **Ollama** | planner prefers MLX, but the MLX backend isn't wired yet → falls back to Ollama. Good for 7B Q4. |
+| Apple Silicon Mac (e.g. 16GB) | **MLX** or Ollama | planner prefers MLX (native Metal via `mlx_lm`); set `mlx_repo` on the card. Ollama is the zero-config fallback. Good for 7B Q4. |
 | Windows + NVIDIA (e.g. 8GB) | **Ollama** | native CUDA. vLLM is Linux/WSL-only. Good for 7B Q4. |
 | Linux + NVIDIA discrete ≥24GB (3090/4090) | **vLLM** | throughput; FP8 on Ada/Hopper+, else AWQ. Ollama also works. |
 | Linux + NVIDIA <24GB | **Ollama** | GGUF fits. |
 | GB10 / DGX Spark (aarch64 unified) | **Ollama** | no official vLLM sm_121 wheels yet. |
-| CPU-only | **Ollama** | planner says llama.cpp, but that backend isn't wired yet → use Ollama. |
+| CPU-only | **llama.cpp** or Ollama | planner says llama.cpp (native `llama-server`); set `gguf_path` on the card. Ollama also works. |
 
-> Ollama is the universal real backend today; vLLM adds throughput on
-> Linux. MLX/llama.cpp native paths are planned (recommended by the
-> planner, not yet wired). See
+> Ollama is the universal zero-config backend; vLLM adds throughput on
+> Linux. MLX (Apple Silicon, `mlx_repo`) and llama.cpp (any box with a
+> GGUF, `gguf_path`) are now wired native paths the planner recommends. See
 > [`docs/CATALOG_STATUS.md`](docs/CATALOG_STATUS.md) for the per-card truth.
 
 ## 5-minute quickstart (two boxes, LAN, still no Tailscale)
@@ -145,7 +145,7 @@ See [`docs/HOMELAB.md`](docs/HOMELAB.md) for the longer walkthrough
 | `mesh/discovery.py` | v0.0.7 | Pull discovery: walk tailnet OR explicit `--peer` list → routes, host-pinned `node_url`s |
 | `mesh/node_server.py` | v0.0.7 | `build_node()` — daemon + `/models` self-description share one registry |
 | `mesh/registry.py` | v0.0.7 | Event-sourced; thread-safe (compaction race fixed in #44); deterministic replay |
-| `mesh/backends.py` | v0.0.7 | `VLLMBackend`, `OllamaBackend` (#45), `NullBackend`. `BaseBackend` Protocol is the seam — adding `llamacpp` / `mlx` is one class. |
+| `mesh/backends.py` | v0.0.7 | `VLLMBackend`, `OllamaBackend` (#45), `LlamaCppBackend` + `MLXBackend` (#60/#61), `NullBackend`. `BaseBackend` Protocol is the seam — each engine is one class. |
 | `mesh/serve.py` | v0.0.7 | `ServeDaemon` boots backends, runs heartbeat loop |
 | `mesh/select.py` | v0.0.7 | `select_mesh_route` — classifier verdict + snapshot → ranked routes + cloud fallback |
 | `mesh/allocator.py` | v0.0.1 | `model_fit_score` + 3 cluster strategies |
@@ -159,8 +159,8 @@ See [`docs/HOMELAB.md`](docs/HOMELAB.md) for the longer walkthrough
 |---|---|---|
 | `vllm` | wired, kernel-gated on Blackwell | Linux/WSL + CUDA. Native FP8 on Hopper/Ada; Marlin weight-only fallback on Blackwell consumer (sm_120/sm_121, vLLM 0.17 ships no `cutlass_scaled_mm` FP8 GEMM yet). |
 | `ollama` | **wired (#45)** | Mac (any), AMD, Windows + NVIDIA, GB10, small NVIDIA. Adopts your running Ollama daemon at `127.0.0.1:11434` (or `OLLAMA_HOST=0.0.0.0:11434` for LAN exposure). `OLLAMA_PORT` env honored. |
-| `llamacpp` | sketched, not wired | Set `required_backend = "ollama"` + add `ollama_tag` to serve GGUF through Ollama meanwhile. |
-| `mlx` | sketched, not wired | Same workaround: route Apple Silicon through Ollama, which ships native Metal acceleration. |
+| `llamacpp` | **wired (#61)** | Any box with a GGUF — the CPU-only / no-CUDA-no-Metal path. Owns a `llama-server` subprocess (spawns, or adopts one already bound to the port). Set `gguf_path` on the card (local path or `repo:file` HF id); needs `llama-server` on `PATH`. Health via `GET /health`. |
+| `mlx` | **wired (#60)** | Apple Silicon native (Metal). Owns an `mlx_lm.server` subprocess (`python -m mlx_lm.server --model <repo>`). Set `mlx_repo` on the card (an `mlx-community/...` HF repo); needs `mlx_lm` installed. Refuses on non-Darwin/arm64 hosts with a clear error. Health via `GET /v1/models`. |
 
 ## Multi-machine over Tailscale (production posture)
 

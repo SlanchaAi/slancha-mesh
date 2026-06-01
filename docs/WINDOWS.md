@@ -15,11 +15,13 @@ acceleration. No `slancha-local` detour required for serving.
 Ollama (GPU, native Windows)  ←  slancha-mesh up (OllamaBackend, adopts the daemon)  ←  discoverable mesh node
 ```
 
-vLLM remains Linux/WSL-only; the llama.cpp and MLX backends are not yet
-wired (their cards fall back to `NullBackend`). On Windows + NVIDIA the
-real path is Ollama, and `slancha-mesh up --specialist <ollama-card>`
-serves it directly. `plan` / `doctor` / `discover` also run on Windows
-and tell you what to do.
+vLLM remains Linux/WSL-only. The llama.cpp backend is now wired (a card
+with `gguf_path` spawns/adopts `llama-server`), so a CPU-only Windows box
+with a GGUF can serve natively; the MLX backend is wired too but
+Apple-Silicon-only and refuses on Windows with a clear error. On Windows +
+NVIDIA the easiest real path is still Ollama, and
+`slancha-mesh up --specialist <ollama-card>` serves it directly.
+`plan` / `doctor` / `discover` also run on Windows and tell you what to do.
 
 ## `slancha-mesh up` on Windows — what runs
 
@@ -30,8 +32,13 @@ and tell you what to do.
   `OllamaBackend` in `build_backend` (`mesh/serve.py`), which adopts an
   already-running Ollama daemon, ensures the tag is pulled, and serves its
   OpenAI-compat `/v1` endpoints. So `slancha-mesh up --specialist <ollama-card>`
-  does real inference on Windows. (`llamacpp`/`mlx` cards still fall back to
-  `NullBackend` — those backends aren't wired yet.)
+  does real inference on Windows.
+- **`llamacpp` cards are wired (#61).** A card with `gguf_path` resolves to
+  `LlamaCppBackend`, which spawns (or adopts) a `llama-server` process — the
+  CPU-only path that runs on Windows too. `mlx` cards resolve to `MLXBackend`
+  but refuse on Windows (Apple-Silicon-only); a card missing the required
+  model field (`gguf_path` / `mlx_repo`) still falls back to `NullBackend`
+  with a log hint.
 
 `slancha-local` is still a fine way to run a node (richer routing), but it's
 no longer *required* for Windows serving.
@@ -106,7 +113,7 @@ From any `tag:gateway`/admin box: `slancha-mesh discover` → this node appears.
 
 | Gotcha | Why | Do instead |
 |---|---|---|
-| `slancha-mesh up --specialist X` (llamacpp/mlx card) doesn't really serve | those backends aren't wired; the card falls back to `NullBackend` | use an `ollama` card (wired, #45) or run vLLM under WSL2 |
+| `slancha-mesh up --specialist X` (llamacpp/mlx card) doesn't really serve | the card is missing its model field (`gguf_path` for llamacpp, `mlx_repo` for mlx) so it falls back to `NullBackend`; or it's an `mlx` card on Windows (Apple-Silicon-only) | set `gguf_path` and install `llama-server`, or use an `ollama` card (wired, #45) |
 | `slancha-mesh up --with-router` fails | its process-launch is POSIX-only (`start_new_session`) | run `slancha serve` directly |
 | `plan` recommends Ollama, not vLLM | vLLM is Linux/WSL-only | correct — or run vLLM under WSL2 for its throughput |
 | local classifier won't load | treelite/libomp not on Windows | rules-fallback routing is automatic + fine |

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
 import sys
@@ -30,6 +31,8 @@ from pathlib import Path
 from mesh.backends import (
     DEFAULT_OLLAMA_PORT,
     BaseBackend,
+    LlamaCppBackend,
+    MLXBackend,
     NullBackend,
     OllamaBackend,
     VLLMBackend,
@@ -51,6 +54,8 @@ from mesh.training import TrainingPass
 
 HEARTBEAT_INTERVAL_S = 5.0
 RUNTIME_DIR = Path(__file__).parent / ".runtime"
+
+_logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -413,11 +418,40 @@ def build_backend(
             port=ollama_port,
             log_path=log_path,
         )
-    if card.required_backend in ("llamacpp", "mlx"):
-        # Not yet wired — set the card's `required_backend` to "ollama" +
-        # add `ollama_tag` to serve GGUF/MLX models through the Ollama path
-        # in the meantime.
-        return NullBackend(card=card)
+    if card.required_backend == "llamacpp":
+        # llama-server owns its own subprocess (like vLLM); needs a GGUF.
+        # Missing `gguf_path` → NullBackend with a hint so a mixed catalog
+        # still boots (mirrors the ollama_tag-missing path above).
+        if card.gguf_path is None:
+            _logger.warning(
+                "specialist %r requires llamacpp but has no `gguf_path`; "
+                "falling back to NullBackend. Set `gguf_path` on the card.",
+                card.specialist_id,
+            )
+            return NullBackend(card=card)
+        return LlamaCppBackend(
+            card=card,
+            host=bind_host,
+            port=port,
+            log_path=log_path,
+        )
+    if card.required_backend == "mlx":
+        # mlx_lm.server owns its own subprocess (Apple Silicon Metal); needs
+        # an mlx-community HF repo. Missing `mlx_repo` → NullBackend with a
+        # hint. (The Apple-Silicon platform guard lives in MLXBackend.start.)
+        if card.mlx_repo is None:
+            _logger.warning(
+                "specialist %r requires mlx but has no `mlx_repo`; falling "
+                "back to NullBackend. Set `mlx_repo` on the card.",
+                card.specialist_id,
+            )
+            return NullBackend(card=card)
+        return MLXBackend(
+            card=card,
+            host=bind_host,
+            port=port,
+            log_path=log_path,
+        )
     raise ValueError(f"unknown backend {card.required_backend!r}")
 
 
