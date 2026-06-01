@@ -171,10 +171,14 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 
 > Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
 
-## CLI
+## Skill files (optional — local GitNexus plugin only)
 
-| Task | Read this skill file |
-|------|---------------------|
+> **Not shipped in this repo.** The files below ship with the [GitNexus Claude Code plugin](https://github.com/gitnexus/gitnexus); they only exist on your machine if you have that plugin installed (the project's `.claude/` directory is developer-local and gitignored). If you do **not** have the plugin, ignore this table — everything you need is in the **GitNexus — Code Intelligence** section above (inline MCP tool usage, the **Tools Quick Reference**, and **Resources**).
+
+If you have the plugin installed, these skill files go deeper per task:
+
+| Task | Skill file (local plugin) |
+|------|---------------------------|
 | Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
 | Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
 | Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
