@@ -46,7 +46,7 @@ live traffic → embed (mmBERT ✓) → GradedTrace store  [persist embedding + 
   ── idle / offline ──
   1. CLUSTER embeddings → emergent clusters {C₁..Cₖ}      train/cluster.py ✓ (KMeans)
   2. RELABEL corpus by cluster → RETRAIN heads to clusters    heads ✓, corpus builders ✓
-  3. per stable/high-volume cluster → FT a specialist         bundle.py ✓ / PEFT = STUB (contract-only stub today; real PEFT tracked in #65)
+  3. per stable/high-volume cluster → FT a specialist         bundle.py ✓ / PEFT = REAL (behind `[train]` extra, #65; stub kept for contract tests) — GB10/Spark validation pending
   4. REDEPLOY: hot-load adapter → catalog/registry/router cutover
   5. GATE every promotion on eval/holdout mean-score          holdout ✓
   └──────────────────────────── repeat ────────────────────────────┘
@@ -56,7 +56,8 @@ live traffic → embed (mmBERT ✓) → GradedTrace store  [persist embedding + 
 
 **Exists:** mmBERT embedder + per-request embedding; `slancha_local/train/`
 (`cluster_by_route`, `build_train_bundle` → axolotl JSONL); treelite heads;
-corpus builders + `preclassify_corpus`; serve daemon + `TrainingPass` (stub) +
+corpus builders + `preclassify_corpus`; serve daemon + `TrainingPass` (stub
+contract **+ real PEFT leg behind the `[train]` extra**, #65) +
 checkpoint/merge contract; `idle.py` detector; `replay_store`; `eval/holdout`;
 `registry.record_quality_observation`; `quality_probe` + `Scorer` protocol;
 `quality_*` schema with three observation sources; node Docker image with the
@@ -67,8 +68,8 @@ classifier baked in.
 2. **The grader** — replace `StubScorer` with a real local-judge `Scorer`; wire grade → registry quality **and** → labeled replay (today the judge writes JSONL for a dashboard only).
 3. **Cluster stability** — KMeans is run-unstable; need stable cluster identity (centroid matching / incremental) + auto-k bounded by fleet capacity. *(Deferred past v1 — see plan.)*
 4. **Head retrain target** — heads predict fixed domains today; retrain to predict **cluster id**.
-5. **Real per-cluster FT** — `_apply_lora_step` (`time.sleep`) → real PEFT/axolotl.
-6. **Gated redeploy** — adapter hot-swap + base-fingerprint guard + registry/router atomic cutover + champion/challenger promotion.
+5. **Real per-cluster FT** — *done in code (#65)*: `TrainingPass(allow_real=True)` loads the base model + tokenizer (transformers), wraps with a `peft` LoRA config, trains a few steps on the replay corpus, and saves a real adapter via `save_pretrained` — `meta.stub=False` + a `base_model_fingerprint`, so the eval gate promotes it. Heavy deps are the optional **`[train]` extra** (`pip install -e ".[train]"`), imported lazily; absent them the real path raises `MissingTrainingDepsError` (never a silent stub fallback, #55). The stub path (`allow_stub=True`) is kept for the contract tests. **Remaining:** full GB10/DGX-Spark validation of a real pass under `gpu-launch --kind training` (acceptance step for #65).
+6. **Gated redeploy** — adapter hot-swap + base-fingerprint guard + registry/router atomic cutover + champion/challenger promotion. *Partial (#65):* `ChampionRegistry` (in `mesh/training.py`) tracks the current champion adapter as a pointer and keeps the prior one so a failed promotion rolls back instantly (adapters-as-pointers). Hot-swap + router cutover still to wire.
 7. **No mesh container** — slancha-mesh has no Docker/compose (only systemd units).
 
 ## The grader = 3 tiers = the free/paid line
@@ -102,8 +103,10 @@ tailnet/registry/allocator.
   corpus → candidate taxonomy; observe vs. the fixed taxonomy on holdout.
 - **P2 — gated head retrain, single node:** retrain heads to clusters,
   champion/challenger on the curated holdout. **← first self-organizing release.**
-- **P3 — specialist FT + gated redeploy:** real PEFT; adapters-as-pointers +
-  `base_fingerprint`; mesh-drain-on-train (frees the node's GPU); atomic
+- **P3 — specialist FT + gated redeploy:** real PEFT *(landed in code, #65 —
+  `TrainingPass(allow_real=True)` + `[train]` extra; GB10/Spark validation
+  pending)*; adapters-as-pointers + `base_fingerprint` *(`ChampionRegistry`
+  rollback landed, #65)*; mesh-drain-on-train (frees the node's GPU); atomic
   hot-swap. **← the "compute → specialists" release.**
 - **P4 — federation + cloud-oracle (paid):** mesh-wide clusters, cloud labels.
 

@@ -47,6 +47,17 @@ mesh-doctor = "mesh.scripts.mesh_doctor:main"
 serve = [
   "vllm>=0.17",
 ]
+train = [
+  # Real LoRA/PEFT fine-tune leg (issue #65). Heavy + GPU-oriented, so it
+  # is an opt-in extra: the package imports and the test suite run without
+  # it installed (the real training path imports these lazily). Install with
+  #   pip install -e ".[train]"
+  "torch>=2.2",
+  "transformers>=4.40",
+  "peft>=0.10",
+  "datasets>=2.18",
+  "accelerate>=0.29",
+]
 dashboard = [
   "streamlit>=1.30",
 ]
