@@ -299,6 +299,12 @@ class ServeDaemon:
             domain=primary_card.domain,
             replay_store=self.training_replay_store,
             checkpoint_dir=self.training_checkpoint_dir,
+            # v0.0.4 intentionally runs the contract-only stub (issue #55):
+            # this leg exists to exercise the daemon thread-spawn + preempt
+            # wiring, not to produce a real adapter. Opt in explicitly so the
+            # stub does not raise StubTrainingError. Real PEFT lands in #65.
+            # Placed before **kwargs so a caller can still override it.
+            allow_stub=True,
             **kwargs,
         )
         try:

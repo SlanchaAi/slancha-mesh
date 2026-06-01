@@ -46,7 +46,7 @@ live traffic → embed (mmBERT ✓) → GradedTrace store  [persist embedding + 
   ── idle / offline ──
   1. CLUSTER embeddings → emergent clusters {C₁..Cₖ}      train/cluster.py ✓ (KMeans)
   2. RELABEL corpus by cluster → RETRAIN heads to clusters    heads ✓, corpus builders ✓
-  3. per stable/high-volume cluster → FT a specialist         bundle.py ✓ / PEFT = STUB
+  3. per stable/high-volume cluster → FT a specialist         bundle.py ✓ / PEFT = STUB (contract-only stub today; real PEFT tracked in #65)
   4. REDEPLOY: hot-load adapter → catalog/registry/router cutover
   5. GATE every promotion on eval/holdout mean-score          holdout ✓
   └──────────────────────────── repeat ────────────────────────────┘

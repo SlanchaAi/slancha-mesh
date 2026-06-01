@@ -47,6 +47,15 @@ FAST_FAKE_STEPS: int = 20
 PER_STEP_SLEEP_S: float = 0.001  # 1ms per step → ~20ms total stub training
 
 
+class StubTrainingError(RuntimeError):
+    """Raised when `TrainingPass.run()` is called without opting into the stub.
+
+    The stub performs no real PEFT (issue #55); real PEFT is tracked in
+    issue #65. Refusing by default keeps a demo from treating the stub's
+    seed-derived checkpoint as a real improved model and promoting it.
+    """
+
+
 @dataclass
 class CheckpointMeta:
     """Per-checkpoint metadata; persisted alongside the (stub) state-dict.
@@ -140,6 +149,10 @@ class TrainingPass:
     n_examples: int = 64
     n_steps_planned: int = FAST_FAKE_STEPS
     per_step_sleep_s: float = PER_STEP_SLEEP_S
+    # Explicit opt-in required to run the contract-only stub (issue #55).
+    # Defaults False so a caller can never accidentally execute a pass that
+    # does no real PEFT and writes a checkpoint mistakable for a real adapter.
+    allow_stub: bool = False
 
     _meta: CheckpointMeta | None = field(default=None, init=False)
 
@@ -150,6 +163,20 @@ class TrainingPass:
         a checkpoint reflecting steps-completed-so-far + preempted=True.
         Pass `None` to disable preemption (tests that don't need it).
         """
+        # Refuse to run silently: this is a contract-only stub (issue #55).
+        # It performs no real PEFT — real training is tracked in issue #65.
+        # A caller must explicitly pass allow_stub=True to acknowledge that
+        # the resulting checkpoint holds placeholder weights, not a trained
+        # adapter, and must not be promoted as a real quality improvement.
+        if not self.allow_stub:
+            raise StubTrainingError(
+                "TrainingPass is a contract-only STUB: it performs no real "
+                "PEFT and the checkpoint it would write contains placeholder "
+                "weights (meta.stub=True), not a trained adapter. Refusing to "
+                "run. Pass allow_stub=True to run it knowingly as a stub. Real "
+                "PEFT is tracked in issue #65."
+            )
+
         if preempt_event is None:
             preempt_event = threading.Event()  # never set; loops to completion
 
@@ -252,6 +279,7 @@ __all__ = [
     "CheckpointMeta",
     "FAST_FAKE_STEPS",
     "PER_STEP_SLEEP_S",
+    "StubTrainingError",
     "TrainingPass",
     "load_checkpoint",
 ]

@@ -165,6 +165,45 @@ def test_verdict_provenance_defaults_none_on_old_rows():
     assert row["artifact_sha256_challenger"] is None
 
 
+def test_rejects_stub_challenger_even_when_scores_pass():
+    """A stub-produced challenger artifact can never be promoted, even with
+    a clean mean lift and no per-domain regression (issue #55)."""
+    champ = _row("v1", 3.50, {"code": 3.5, "general": 3.5})
+    chall = _row("v2", 3.90, {"code": 3.9, "general": 3.9})  # would otherwise pass
+    chall["meta_stub"] = True
+    v = decide(champ, chall)
+    assert v.accept is False
+    assert any("stub artifact cannot be promoted" in r for r in v.reject_reasons)
+
+
+def test_rejects_stub_champion():
+    """A stub champion is just as poisonous a baseline — reject."""
+    champ = _row("v1", 3.50, {"code": 3.5})
+    champ["meta_stub"] = True
+    chall = _row("v2", 3.90, {"code": 3.9})
+    v = decide(champ, chall)
+    assert v.accept is False
+    assert any("stub artifact cannot be promoted" in r for r in v.reject_reasons)
+
+
+def test_rejects_stub_via_explicit_param():
+    """Stub can also be flagged out-of-band via decide()'s optional params."""
+    champ = _row("v1", 3.50, {"code": 3.5})
+    chall = _row("v2", 3.90, {"code": 3.9})
+    v = decide(champ, chall, challenger_is_stub=True)
+    assert v.accept is False
+    assert any("stub artifact cannot be promoted" in r for r in v.reject_reasons)
+
+
+def test_non_stub_artifacts_still_promote_normally():
+    """Absence of any stub marker → gate behaves exactly as before."""
+    champ = _row("v1", 3.50, {"code": 3.5, "general": 3.5})
+    chall = _row("v2", 3.80, {"code": 3.8, "general": 3.8})
+    v = decide(champ, chall)
+    assert v.accept is True
+    assert not any("stub" in r for r in v.reject_reasons)
+
+
 def test_append_verdict_writes_jsonl(tmp_path: Path):
     out = tmp_path / "promotions.jsonl"
     v = PromotionVerdict(

@@ -20,6 +20,7 @@ from mesh.replay_store import TrafficReplayStore
 from mesh.training import (
     FAST_FAKE_STEPS,
     CheckpointMeta,
+    StubTrainingError,
     TrainingPass,
     _corpus_hash,
     _stub_state_dict,
@@ -104,6 +105,7 @@ def test_training_pass_runs_to_completion(tmp_path: Path):
         checkpoint_dir=tmp_path,
         n_steps_planned=10,
         per_step_sleep_s=0,
+        allow_stub=True,
     )
     with pytest.warns(UserWarning, match="STUB"):
         out = tp.run()
@@ -126,6 +128,7 @@ def test_run_emits_stub_warning(tmp_path: Path):
         checkpoint_dir=tmp_path,
         n_steps_planned=2,
         per_step_sleep_s=0,
+        allow_stub=True,
     )
     with pytest.warns(UserWarning, match="performs no real PEFT"):
         tp.run()
@@ -141,6 +144,7 @@ def test_training_pass_writes_state_and_meta(tmp_path: Path):
         checkpoint_dir=tmp_path,
         n_steps_planned=5,
         per_step_sleep_s=0,
+        allow_stub=True,
     )
     out = tp.run()
     state_path = out / "state_dict.json"
@@ -165,6 +169,7 @@ def test_training_pass_load_checkpoint_roundtrip(tmp_path: Path):
         n_steps_planned=3,
         per_step_sleep_s=0,
         seed=99,
+        allow_stub=True,
     )
     out = tp.run()
     state, meta = load_checkpoint(out)
@@ -205,6 +210,7 @@ def test_training_pass_preempt_yields_clean(tmp_path: Path):
         checkpoint_dir=tmp_path,
         n_steps_planned=100,
         per_step_sleep_s=0,
+        allow_stub=True,
     )
     ev = threading.Event()
     ev.set()  # already preempted before first step
@@ -228,6 +234,7 @@ def test_training_pass_preempt_mid_loop(tmp_path: Path):
         checkpoint_dir=tmp_path,
         n_steps_planned=1000,  # would take ~1s at default sleep
         per_step_sleep_s=0.001,
+        allow_stub=True,
     )
     ev = threading.Event()
     result: list[Path] = []
@@ -258,8 +265,53 @@ def test_training_pass_no_preempt_event_runs_to_completion(tmp_path: Path):
         checkpoint_dir=tmp_path,
         n_steps_planned=5,
         per_step_sleep_s=0,
+        allow_stub=True,
     )
     tp.run(preempt_event=None)
     assert tp.meta is not None
     assert tp.meta.preempted is False
     assert tp.meta.n_steps_completed == 5
+
+
+# ---------------------------------------------------------------------------
+# Stub opt-in guardrail (issue #55)
+# ---------------------------------------------------------------------------
+
+
+def test_run_without_allow_stub_raises(tmp_path: Path):
+    """Default refuses to run: a stub pass must not execute silently and
+    write a checkpoint a caller could mistake for a real adapter."""
+    tp = TrainingPass(
+        specialist_id="qwen3-math-7b-q4",
+        base_model_id="Qwen/Qwen3-Math-7B",
+        domain="math",
+        replay_store=_store_with(5),
+        checkpoint_dir=tmp_path,
+        n_steps_planned=5,
+        per_step_sleep_s=0,
+    )
+    with pytest.raises(StubTrainingError) as exc:
+        tp.run()
+    assert "stub" in str(exc.value).lower()
+    assert "#65" in str(exc.value)
+    assert tp.meta is None
+    assert not any(tmp_path.iterdir())
+
+
+def test_run_with_allow_stub_runs_and_warns(tmp_path: Path):
+    """allow_stub=True runs exactly as before AND still emits the warning."""
+    tp = TrainingPass(
+        specialist_id="qwen3-math-7b-q4",
+        base_model_id="Qwen/Qwen3-Math-7B",
+        domain="math",
+        replay_store=_store_with(5),
+        checkpoint_dir=tmp_path,
+        n_steps_planned=3,
+        per_step_sleep_s=0,
+        allow_stub=True,
+    )
+    with pytest.warns(UserWarning, match="performs no real PEFT"):
+        out = tp.run()
+    assert out.is_dir()
+    assert tp.meta is not None
+    assert tp.meta.n_steps_completed == 3
