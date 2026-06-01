@@ -491,6 +491,37 @@ class LoopRunner:
 
     # ── the long-lived loop ──
 
+    # ── opt-in: GATE-CONTRACT #8 cloud spot-check drift governor ──
+
+    def enable_cloud_spotcheck(
+        self,
+        cloud_judge: Any,
+        tracker: Any | None = None,
+    ) -> None:
+        """OPT-IN: wrap `gate_decide` with the #8 cloud-spot-check governor.
+
+        Off by default — it costs cloud tokens. When enabled, an accepted
+        verdict that falls in the spot-check sample (~10% of accepts + 100% of
+        marginal ones) is re-graded by the INJECTED `cloud_judge`; if the local
+        judge has drifted (rolling Spearman < 0.7) the promotion is FROZEN.
+
+        Minimal/additive: this only re-points `self.gate_decide` at a wrapper
+        over the existing decide fn — the gate's core logic is untouched, and
+        the runner's promote/archive path is unchanged. `tracker` defaults to a
+        `DriftTracker` persisted under `run_dir` so the window survives restarts.
+        `decisive_gain` is sourced from the runner's own `thresholds`.
+        """
+        from mesh.eval.spotcheck import DriftTracker, cloud_spotcheck_gate
+
+        if tracker is None:
+            tracker = DriftTracker(self.run_dir / "spotcheck.jsonl")
+        self.gate_decide = cloud_spotcheck_gate(
+            self.gate_decide,
+            cloud_judge,
+            tracker,
+            self.thresholds.mean_score_delta,
+        )
+
     def run_forever(self, max_ticks: int | None = None) -> int:
         """Drive ticks until paused or `max_ticks` is reached.
 
