@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from mesh.models import (
     NodeSummary,
     RegistrySnapshot,
@@ -350,3 +352,85 @@ def test_admin_ceiling_quality_floor():
         admin_ceiling={"quality_weight_min": 0.9},  # force high quality
     )
     assert result.specialist_id == "high-q"
+
+
+# ── #56: honor-or-reject the four previously-ignored PrefVector fields ───────
+#
+# Per-field decision (grounded in what a Route actually carries — see
+# mesh.models.Route: specialist_id / node_id / node_url / estimated_queue_ms /
+# p95_latency_ms / cost_estimate_cents):
+#   allow_fallbacks    → HONORED: controls the trailing cloud entry in
+#                        fallback_chain.
+#   require_streaming  → HONORED: filter on SpecialistCard.capabilities, which
+#                        publishes "streaming" (same signal as
+#                        require_capabilities).
+#   max_ttft_ms        → REJECTED: routes carry p95 latency only, no TTFT; we
+#                        refuse rather than silently treat p95 as TTFT.
+#   min_throughput_tps → REJECTED: routes carry no measured throughput
+#                        (build_ranked_routes never propagates estimated_tps).
+
+
+def test_allow_fallbacks_false_drops_cloud_tail():
+    """allow_fallbacks=False → the cloud entry is NOT appended to the chain."""
+    snap = _make_snapshot(
+        {"general|medium": [_route("a"), _route("b", node_id="spark-2")]},
+        {"a": _card("a"), "b": _card("b")},
+    )
+    with_fb = select_mesh_route_with_pref(
+        _signals(), snap, pref=PrefVector(allow_fallbacks=True)
+    )
+    without_fb = select_mesh_route_with_pref(
+        _signals(), snap, pref=PrefVector(allow_fallbacks=False)
+    )
+    # The cloud model is the model with node_id None at the tail of the chain.
+    assert with_fb.fallback_chain[-1][1] is None
+    assert all(node_id is not None for _, node_id in without_fb.fallback_chain)
+    assert len(without_fb.fallback_chain) == len(with_fb.fallback_chain) - 1
+
+
+def test_allow_fallbacks_false_no_mesh_route_has_empty_chain():
+    """allow_fallbacks=False with nothing surviving → no cloud fallback offered."""
+    snap = _make_snapshot(
+        {"general|medium": [_route("slow", p95_ms=3000.0)]},
+        {"slow": _card("slow")},
+    )
+    pref = PrefVector(max_latency_ms_p95=500, allow_fallbacks=False)
+    result = select_mesh_route_with_pref(_signals(), snap, pref=pref)
+    assert result.specialist_id is None
+    assert result.fallback_chain == []
+
+
+def test_require_streaming_drops_non_streaming_routes():
+    """require_streaming=True filters on the 'streaming' capability."""
+    snap = _make_snapshot(
+        {"general|medium": [_route("no-stream"), _route("streams", node_id="spark-2")]},
+        {
+            "no-stream": _card("no-stream", capabilities=["tools"]),
+            "streams": _card("streams", capabilities=["streaming"]),
+        },
+    )
+    pref = PrefVector(require_streaming=True)
+    result = select_mesh_route_with_pref(_signals(), snap, pref=pref)
+    assert result.specialist_id == "streams"
+
+
+def test_max_ttft_ms_is_rejected_as_unsupported():
+    """No per-route TTFT is measured → setting max_ttft_ms must raise."""
+    snap = _make_snapshot(
+        {"general|medium": [_route("a")]},
+        {"a": _card("a")},
+    )
+    with pytest.raises(ValueError, match="max_ttft_ms"):
+        select_mesh_route_with_pref(_signals(), snap, pref=PrefVector(max_ttft_ms=200))
+
+
+def test_min_throughput_tps_is_rejected_as_unsupported():
+    """No per-route throughput is measured → setting min_throughput_tps must raise."""
+    snap = _make_snapshot(
+        {"general|medium": [_route("a")]},
+        {"a": _card("a")},
+    )
+    with pytest.raises(ValueError, match="min_throughput_tps"):
+        select_mesh_route_with_pref(
+            _signals(), snap, pref=PrefVector(min_throughput_tps=50)
+        )
