@@ -165,6 +165,37 @@ def test_verdict_provenance_defaults_none_on_old_rows():
     assert row["artifact_sha256_challenger"] is None
 
 
+def test_verdict_carries_challenger_rationale():
+    """decide() surfaces the human-readable WHY off the CHALLENGER row so a
+    promotion is auditable in plain language, not just by hash (issue #80).
+    Challenger-side only: the champion's own rationale is irrelevant here."""
+    champ = _row("v1", 3.50, {"code": 3.5}, judge_model="j")
+    chall = _row("v2", 3.80, {"code": 3.8}, judge_model="j")
+    rationale = {
+        "hypothesis": "code cluster c_0427 underperforms base by 0.3",
+        "change_summary": "LoRA r=8 on 1840 code traces from c_0427",
+        "expected_effect": "+0.25 mean on the c_0427 holdout, no domain dip",
+    }
+    champ["rationale"] = {"hypothesis": "old", "change_summary": "x",
+                          "expected_effect": "y"}
+    chall["rationale"] = rationale
+    v = decide(champ, chall)
+    assert v.rationale == rationale  # challenger's, verbatim
+    # Survives the JSONL round-trip as a nested object.
+    assert v.to_row()["rationale"] == rationale
+
+
+def test_verdict_rationale_defaults_none_on_old_rows():
+    """Old-shape rows without a rationale key → verdict.rationale None, not a
+    KeyError; verdict still serializes (back-compat, same as #57 fields)."""
+    champ = _row("v1", 3.50, {"code": 3.5}, judge_model="j")
+    chall = _row("v2", 3.80, {"code": 3.8}, judge_model="j")
+    v = decide(champ, chall)
+    assert v.rationale is None
+    row = v.to_row()
+    assert "rationale" in row and row["rationale"] is None
+
+
 def test_rejects_stub_challenger_even_when_scores_pass():
     """A stub-produced challenger artifact can never be promoted, even with
     a clean mean lift and no per-domain regression (issue #55)."""

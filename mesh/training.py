@@ -125,6 +125,24 @@ def _import_train_deps():
     return torch, transformers, peft
 
 
+@dataclass(frozen=True)
+class ImprovementRationale:
+    """Human-readable WHY a challenger adapter was built (issue #80).
+
+    Prior art: hexo-ai/sia writes an `improvement.md` per generation. The
+    #57 provenance HASHES say *what was compared* (artifact / corpus /
+    base-model / holdout identities); this says *why the thing exists and
+    what it set out to fix* — the plain-language complement, auditable
+    without reading logs (mirrors the GATE-CONTRACT "every verdict explains
+    itself" goal). Structured (not freeform) so the producer is forced to
+    state a falsifiable expectation, not just narrate.
+    """
+
+    hypothesis: str        # the cluster/traffic signal that motivated the build
+    change_summary: str     # what the challenger changed vs the champion
+    expected_effect: str    # the measurable lift it was built to produce
+
+
 @dataclass
 class CheckpointMeta:
     """Per-checkpoint metadata; persisted alongside the (stub) state-dict.
@@ -154,6 +172,11 @@ class CheckpointMeta:
     # real PEFT path always stamps it so the gate can compare bases and
     # refuse base/adapter mismatch. Optional so from_json on old rows works.
     base_model_fingerprint: str | None = None
+    # Human-readable improvement rationale (issue #80). None on stub /
+    # legacy checkpoints; the real PEFT path sets it from the cluster signal
+    # that motivated the build. Additive + optional so from_json on old
+    # checkpoints (which lack the key) still works.
+    rationale: ImprovementRationale | None = None
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -166,6 +189,11 @@ class CheckpointMeta:
         d = dict(d)
         d["started_at"] = datetime.fromisoformat(d["started_at"])
         d["finished_at"] = datetime.fromisoformat(d["finished_at"])
+        # asdict() flattened a nested ImprovementRationale to a plain dict on
+        # write; rebuild it. Absent (old checkpoints) → stays None.
+        r = d.get("rationale")
+        if isinstance(r, dict):
+            d["rationale"] = ImprovementRationale(**r)
         return cls(**d)
 
 
@@ -240,6 +268,12 @@ class TrainingPass:
     lora_dropout: float = 0.0
     learning_rate: float = 1e-4
     max_seq_len: int = 128
+
+    # Human-readable rationale for THIS build (issue #80). Optional; when
+    # given, the real PEFT path stamps it onto CheckpointMeta so the eval
+    # gate verdict can explain why the challenger exists in plain language.
+    # The stub path ignores it (a stub is never a real improvement).
+    rationale: ImprovementRationale | None = None
 
     _meta: CheckpointMeta | None = field(default=None, init=False)
 
@@ -410,6 +444,7 @@ class TrainingPass:
             corpus_hash=corpus_h,
             stub=False,
             base_model_fingerprint=fingerprint,
+            rationale=self.rationale,
         )
         return self._write_real_checkpoint(model)
 

@@ -100,6 +100,16 @@ class PromotionVerdict:
     code_sha_champion: str | None = None
     code_sha_challenger: str | None = None
 
+    # ── improvement rationale (issue #80) ────────────────────────────────
+    # Human-readable WHY for the CHALLENGER ({hypothesis, change_summary,
+    # expected_effect}), complementing the #57 hashes above (which say WHAT
+    # was compared). Challenger-side only by design: the rationale answers
+    # "why was THIS challenger built / what did it change", which is
+    # meaningless for the incumbent champion — its own rationale was recorded
+    # on the verdict that promoted it. Carried straight off the challenger
+    # eval row as an opaque dict; None on stub/legacy rows.
+    rationale: dict[str, Any] | None = None
+
     def to_row(self) -> dict[str, Any]:
         return {
             **asdict(self),
@@ -220,6 +230,8 @@ def decide(
         router_config_hash_challenger=challenger.get("router_config_hash"),
         code_sha_champion=champion.get("code_sha"),
         code_sha_challenger=challenger.get("code_sha"),
+        # Issue #80: the human-readable WHY for the challenger, off its row.
+        rationale=challenger.get("rationale"),
     )
 
 

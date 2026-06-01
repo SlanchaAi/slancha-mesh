@@ -182,6 +182,12 @@ class EvalPass:
     base_model_fingerprint: str | None = None
     router_config_hash: str | None = None
     code_sha: str | None = None
+    # Human-readable improvement rationale (issue #80), carried as an opaque
+    # dict ({hypothesis, change_summary, expected_effect}) so this module and
+    # the gate stay decoupled from training.ImprovementRationale. The caller
+    # populates it from CheckpointMeta.rationale (asdict). None on stub /
+    # legacy passes — old-shape row preserved.
+    rationale: dict[str, Any] | None = None
 
     def to_row(self) -> dict[str, Any]:
         """JSON-serializable row for eval_results.jsonl."""
@@ -208,6 +214,7 @@ class EvalPass:
             "base_model_fingerprint":  self.base_model_fingerprint,
             "router_config_hash":      self.router_config_hash,
             "code_sha":                self.code_sha,
+            "rationale":               self.rationale,
         }
 
 
@@ -271,6 +278,7 @@ def run_eval_pass(
     base_model_fingerprint: str | None = None,
     router_config_hash: str | None = None,
     code_sha: str | None = None,
+    rationale: dict[str, Any] | None = None,
     now: Callable[[], float] = time.time,
 ) -> EvalPass:
     """Route every seed record through `dispatcher`, score each with
@@ -284,6 +292,11 @@ def run_eval_pass(
     `CheckpointMeta`: corpus_hash → training_corpus_hash, base_model_id →
     base_model_fingerprint) — they cannot be derived from the eval pass
     itself. All are optional; a row written without them stays old-shape.
+
+    `rationale` (issue #80) is the human-readable WHY for the candidate,
+    carried as an opaque dict; populate from `CheckpointMeta.rationale`
+    (`asdict(meta.rationale)` if present, else None). None for the champion /
+    baseline passes — only a built challenger has a rationale.
 
     Failure model:
       - dispatcher raises EndpointError → record gets score 0, counted in
@@ -366,6 +379,7 @@ def run_eval_pass(
         base_model_fingerprint=base_model_fingerprint,
         router_config_hash=router_config_hash,
         code_sha=code_sha if code_sha is not None else _git_code_sha(),
+        rationale=rationale,
     )
 
 
