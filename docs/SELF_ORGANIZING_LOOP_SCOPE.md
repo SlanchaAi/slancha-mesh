@@ -19,6 +19,19 @@ R2-Router, vLLM-SR, RouteLLM, …) routes across *existing* models. **None turn
 idle compute into new specialists, and none route across machines.** That is
 slancha's uncontested wedge.
 
+**Prior art on the self-improving loop itself — and where we diverge.**
+Autonomous self-improvement frameworks exist (e.g. [hexo-ai/sia](https://github.com/hexo-ai/sia):
+meta-agent → target-agent → feedback-agent over N generations). They're useful
+validation that the *shape* is sound, but SIA's `orchestrator.py` is an
+**unguarded hill-climb**: each generation runs, is "evaluated," and is fed to
+the next regardless of score — there is **no acceptance gate, no best-so-far
+retention, no rollback** (a failed generation still spawns the next). That is
+exactly the regression footgun our design forbids. Our loop's load-bearing
+difference is invariant #5 below: **every promotion passes a curated holdout
+gate (with per-domain non-regression), stub/low-quality artifacts are refused,
+and `ChampionRegistry` keeps the prior champion for instant rollback.** Gated
+promotion + rollback — not the generational loop — is the defensible part.
+
 ## Architecture — five invariants that keep it elegant
 
 1. **Everything is an OpenAI-compatible endpoint.** Node, mesh-gateway,
