@@ -19,37 +19,33 @@ optional). No data leaves your hardware. Apache-2.0.
 > Llama-3.1-8B, Aya-Expanse-8B, Phi-4-14B). See
 > [`docs/CATALOG_STATUS.md`](docs/CATALOG_STATUS.md) for the per-card truth.
 
-## 30-second quickstart (one box, no Tailscale)
+## 60-second quickstart (one box, Ollama already installed)
+
+Copy/paste this whole block. By the end you'll have a model answering a
+real prompt *through the mesh router* — and you'll know exactly which line
+proves it worked.
 
 ```bash
+# 1. Install the project. uv is fastest; the plain pip path works identically.
+#    uv:  curl -LsSf https://astral.sh/uv/install.sh | sh
+#    (or skip uv entirely and use the python -m venv path on the next line)
 git clone https://github.com/SlanchaAi/slancha-mesh.git
 cd slancha-mesh
-uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
+uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
+# --- pip-only alternative (no uv): ------------------------------------
+# python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
+# ---------------------------------------------------------------------
 
-# Pick something your hardware can serve. If you already run Ollama:
+# 2. Pull a model your hardware can serve, through your existing Ollama:
 ollama pull qwen2.5-coder:7b-instruct-q4_K_M
 
-# Start the node — adopts your existing Ollama daemon, advertises on :8088.
+# 3. Start the node — adopts your running Ollama daemon, advertises on :8088.
 slancha-mesh up --specialist qwen2.5-coder-7b-q4-ollama
 
-# In another terminal — discover what's reachable + route table:
-slancha-mesh discover --peer 127.0.0.1
-```
-
-That's the whole thing on a single box. `discover --peer 127.0.0.1` reads
-the local node-info, skips Tailscale entirely, and shows the node as
-`reachable=1` with the specialist bound to your Ollama daemon's URL.
-
-Point any OpenAI-compatible client (Open WebUI, LiteLLM, your `curl`)
-at the discovered `node_url` directly — OR run the standalone router
-proxy and point clients at one URL across every reachable specialist:
-
-```bash
-# In a third terminal: a drop-in OpenAI /v1 endpoint over your mesh
+# 4. In another terminal: a drop-in OpenAI /v1 endpoint over your mesh.
 slancha-mesh router --peer 127.0.0.1 --port 8080
 
-# Then from anywhere — same shape as api.openai.com /v1
+# 5. In a third terminal: ask a question — same shape as api.openai.com /v1.
 curl -s http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
@@ -57,6 +53,49 @@ curl -s http://localhost:8080/v1/chat/completions \
     "messages": [{"role":"user","content":"reverse a string in python"}]
   }' | jq -r '.choices[0].message.content'
 ```
+
+Expected output from step 5 — a short code answer coming back:
+
+```text
+You can reverse a string in Python with a slice:
+
+    s = "hello"
+    print(s[::-1])   # 'olleh'
+```
+
+**That text is the proof.** It came back from `localhost:8080` — your
+local mesh router — which means the router discovered your node and
+routed the prompt to the model running on *your* Ollama daemon. No cloud,
+no API key, one box.
+
+Want to see *what's reachable* instead of just getting an answer? The
+`discover` command is the route-table / reachability inspector (secondary
+to the answer above):
+
+```bash
+# Reads local node-info, skips Tailscale, shows the node as reachable=1
+# with the specialist bound to your Ollama daemon's URL.
+slancha-mesh discover --peer 127.0.0.1
+```
+
+### which backend actually runs on your hardware?
+
+The planner recommends an engine per OS; the table below is what *actually
+serves today* vs. what's recommended. Pick the model size your VRAM fits.
+
+| Hardware | Real backend today | Notes |
+|---|---|---|
+| Apple Silicon Mac (e.g. 16GB) | **Ollama** | planner prefers MLX, but the MLX backend isn't wired yet → falls back to Ollama. Good for 7B Q4. |
+| Windows + NVIDIA (e.g. 8GB) | **Ollama** | native CUDA. vLLM is Linux/WSL-only. Good for 7B Q4. |
+| Linux + NVIDIA discrete ≥24GB (3090/4090) | **vLLM** | throughput; FP8 on Ada/Hopper+, else AWQ. Ollama also works. |
+| Linux + NVIDIA <24GB | **Ollama** | GGUF fits. |
+| GB10 / DGX Spark (aarch64 unified) | **Ollama** | no official vLLM sm_121 wheels yet. |
+| CPU-only | **Ollama** | planner says llama.cpp, but that backend isn't wired yet → use Ollama. |
+
+> Ollama is the universal real backend today; vLLM adds throughput on
+> Linux. MLX/llama.cpp native paths are planned (recommended by the
+> planner, not yet wired). See
+> [`docs/CATALOG_STATUS.md`](docs/CATALOG_STATUS.md) for the per-card truth.
 
 ## 5-minute quickstart (two boxes, LAN, still no Tailscale)
 

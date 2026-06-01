@@ -7,26 +7,34 @@
 
 ## TL;DR
 
-slancha-mesh's serving daemon is vLLM-centric (Linux/WSL). On **Windows**, a
-node serves through the cross-OS path instead:
+On **Windows**, `slancha-mesh up` works natively: it adopts your running
+**Ollama** daemon via the `OllamaBackend` (wired in #45) with CUDA
+acceleration. No `slancha-local` detour required for serving.
 
 ```
-Ollama (GPU, native Windows)  ←  slancha-local (OpenAI endpoint + tailnet heartbeat)  ←  discoverable mesh node
+Ollama (GPU, native Windows)  ←  slancha-mesh up (OllamaBackend, adopts the daemon)  ←  discoverable mesh node
 ```
 
-`slancha-mesh` itself provides the **agent-facing intelligence** —
-`plan` / `doctor` / `discover` — which work on Windows and tell you what to do.
+vLLM remains Linux/WSL-only; the llama.cpp and MLX backends are not yet
+wired (their cards fall back to `NullBackend`). On Windows + NVIDIA the
+real path is Ollama, and `slancha-mesh up --specialist <ollama-card>`
+serves it directly. `plan` / `doctor` / `discover` also run on Windows
+and tell you what to do.
 
-## Why not just `slancha-mesh up` on Windows?
+## `slancha-mesh up` on Windows — what runs
 
-Two reasons, both intentional:
-1. **vLLM is Linux/WSL-only.** The OS-aware engine recommender (`recommend_engine`)
-   detects Windows and recommends **Ollama** (which runs natively with CUDA
-   acceleration), not vLLM. _[confirmed in code; verifying on hardware]_
-2. **slancha-mesh only implements the vLLM backend.** `ollama`/`llamacpp` cards
-   fall back to `NullBackend` (a stub that "pretends to serve"). So real
-   inference on Windows comes from **slancha-local + Ollama**, not
-   `slancha-mesh up`.
+- **vLLM is Linux/WSL-only.** The OS-aware engine recommender (`recommend_engine`)
+  detects Windows and recommends **Ollama** (which runs natively with CUDA
+  acceleration), not vLLM. _[confirmed in code; verifying on hardware]_
+- **The Ollama backend is wired (#45).** An `ollama` card resolves to
+  `OllamaBackend` in `build_backend` (`mesh/serve.py`), which adopts an
+  already-running Ollama daemon, ensures the tag is pulled, and serves its
+  OpenAI-compat `/v1` endpoints. So `slancha-mesh up --specialist <ollama-card>`
+  does real inference on Windows. (`llamacpp`/`mlx` cards still fall back to
+  `NullBackend` — those backends aren't wired yet.)
+
+`slancha-local` is still a fine way to run a node (richer routing), but it's
+no longer *required* for Windows serving.
 
 ## Prerequisites
 
@@ -98,7 +106,7 @@ From any `tag:gateway`/admin box: `slancha-mesh discover` → this node appears.
 
 | Gotcha | Why | Do instead |
 |---|---|---|
-| `slancha-mesh up --specialist X` doesn't really serve | only vLLM backend is wired; ollama → `NullBackend` stub | serve via `slancha serve` (slancha-local + Ollama) |
+| `slancha-mesh up --specialist X` (llamacpp/mlx card) doesn't really serve | those backends aren't wired; the card falls back to `NullBackend` | use an `ollama` card (wired, #45) or run vLLM under WSL2 |
 | `slancha-mesh up --with-router` fails | its process-launch is POSIX-only (`start_new_session`) | run `slancha serve` directly |
 | `plan` recommends Ollama, not vLLM | vLLM is Linux/WSL-only | correct — or run vLLM under WSL2 for its throughput |
 | local classifier won't load | treelite/libomp not on Windows | rules-fallback routing is automatic + fine |
