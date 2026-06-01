@@ -227,6 +227,30 @@ mean *opposite* things:
 Don't point a pull consumer at a push registry; pick one model per
 deployment.
 
+### Which default? (one default per role)
+
+There is exactly **one default per role** — they must never both be the local
+default, or you get a node that's alive-but-invisible (running, but in nobody's
+routing table) or, worse, one that shows up twice.
+
+| | **PULL** (discover) — the local default | **PUSH** (registry/heartbeat) — the service tier |
+|---|---|---|
+| **Use when** | one box, a LAN, or a tailnet you can name. The r/LocalLLaMA path: `up` → `discover` → `router`. | a multi-tenant gateway, ops dashboards, or slancha-api — anything that must aggregate nodes it doesn't control. |
+| **Who decides membership** | the **consumer** walks the network and finds live nodes (each node's `/models` self-description). | the **node** announces itself to a central `MeshRegistry` and heartbeats. |
+| **Central server** | **none.** No registry to stand up, nothing to keep alive. | a `MeshRegistry` (the cloud / ops control plane). |
+| **A dead node** | silently drops out of discovery — it just stops answering. | stops heartbeating; the registry ages it out. |
+| **Default for** | `slancha-mesh router` over LAN / tailnet (this README's quickstart). | `slancha-api` and hosted / multi-tenant deployments. |
+
+**Never mix these defaults** on the same path. The only time both run at once is
+when a node lives on the local mesh **and** also pushes to a separate hosted
+gateway for a different audience — and even then, each consumer builds its
+routing table from exactly one plane, so the node is counted once. Running push
+and pull as competing defaults for the *same* router is the bug, not a feature:
+that is how you end up "registered but invisible" or listed twice.
+
+If you only read one row: **local / LAN / tailnet → pull. service / cloud / ops
+→ push.**
+
 ## Port convention — the routability invariant
 
 On a tailnet the ACL is deny-by-default, so ports are not interchangeable.

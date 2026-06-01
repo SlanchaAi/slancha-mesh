@@ -11,6 +11,11 @@ You already have a running `slancha-local` + `vLLM` (or `llama.cpp` /
 or downloaded a new LoRA / merged model. Goal: get it visible in the
 mesh registry so the router can pick it.
 
+> This case uses the **push** (central `MeshRegistry` + heartbeat) control
+> plane — the service / cloud / ops tier. On a single box, LAN, or tailnet,
+> pull (discover) is the default and needs no registry. See
+> [Which default? (one default per role)](README.md#which-default-one-default-per-role).
+
 1. **Write the card TOML.** Drop a file at `mesh/catalog/<your-id>.toml`:
 
    ```toml
