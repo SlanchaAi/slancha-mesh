@@ -271,6 +271,31 @@ def test_eval_pass_provenance_defaults_none_when_not_supplied(tmp_path: Path):
     assert row["router_config_hash"] is None
 
 
+def test_eval_pass_threads_caller_rationale(tmp_path: Path):
+    """The human-readable rationale (issue #80) threads onto the dataclass
+    and the row as an opaque dict; defaults None when not supplied."""
+    seed = _build_verified_seed(tmp_path, {"code": 1})
+    rationale = {
+        "hypothesis": "code cluster c_0427 underperforms base",
+        "change_summary": "LoRA r=8 on 1840 c_0427 traces",
+        "expected_effect": "+0.25 on c_0427 holdout",
+    }
+    ep = run_eval_pass(
+        seed=seed, dispatcher=FakeDispatcher(), scorer=FakeScorer(scores=[5.0]),
+        router_version="v", rationale=rationale,
+    )
+    assert ep.rationale == rationale
+    assert ep.to_row()["rationale"] == rationale
+
+    # Not supplied → None, row stays old-shape-compatible.
+    ep2 = run_eval_pass(
+        seed=seed, dispatcher=FakeDispatcher(), scorer=FakeScorer(scores=[5.0]),
+        router_version="v",
+    )
+    assert ep2.rationale is None
+    assert ep2.to_row()["rationale"] is None
+
+
 def test_provenance_row_parses_through_dashboard_reader(tmp_path: Path):
     """A row carrying provenance must still be parseable by the existing
     dashboard consumer; an old-shape row (no provenance keys) must too."""

@@ -20,6 +20,7 @@ from mesh.replay_store import TrafficReplayStore
 from mesh.training import (
     FAST_FAKE_STEPS,
     CheckpointMeta,
+    ImprovementRationale,
     StubTrainingError,
     TrainingPass,
     _corpus_hash,
@@ -180,6 +181,63 @@ def test_training_pass_load_checkpoint_roundtrip(tmp_path: Path):
     assert state == _stub_state_dict(
         seed=99, n_steps_completed=3, corpus_hash=meta.corpus_hash
     )
+
+
+def test_checkpoint_meta_rationale_roundtrips(tmp_path: Path):
+    """CheckpointMeta.rationale (issue #80) survives the to_json/from_json
+    JSONL round-trip as a structured ImprovementRationale, not a bare dict."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    meta = CheckpointMeta(
+        specialist_id="qwen3-coder-7b-q4",
+        base_model_id="Qwen/Qwen3-Coder-7B",
+        domain="code",
+        seed=0,
+        n_examples=1840,
+        n_steps_completed=50,
+        n_steps_planned=50,
+        started_at=now,
+        finished_at=now,
+        preempted=False,
+        corpus_hash="sha256:abc",
+        stub=False,
+        rationale=ImprovementRationale(
+            hypothesis="code cluster c_0427 underperforms base by 0.3",
+            change_summary="LoRA r=8 on 1840 c_0427 traces",
+            expected_effect="+0.25 on c_0427 holdout, no domain dip",
+        ),
+    )
+    restored = CheckpointMeta.from_json(meta.to_json())
+    assert restored.rationale == meta.rationale
+    assert isinstance(restored.rationale, ImprovementRationale)
+    assert restored.rationale.hypothesis.startswith("code cluster")
+
+
+def test_checkpoint_meta_rationale_defaults_none_on_legacy(tmp_path: Path):
+    """A pre-#80 meta dict (no rationale key) → rationale None, not KeyError.
+    The stub path also never sets a rationale (a stub is not an improvement)."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    legacy = {
+        "specialist_id": "x", "base_model_id": "y", "domain": "general",
+        "seed": 0, "n_examples": 1, "n_steps_completed": 1,
+        "n_steps_planned": 1, "started_at": now.isoformat(),
+        "finished_at": now.isoformat(), "preempted": False,
+        "corpus_hash": "sha256:empty", "stub": True,
+    }
+    meta = CheckpointMeta.from_json(legacy)
+    assert meta.rationale is None
+    # And a freshly-built stub TrainingPass leaves it None.
+    store = _store_with(3)
+    tp = TrainingPass(
+        specialist_id="s", base_model_id="b", domain="math",
+        replay_store=store, checkpoint_dir=tmp_path,
+        n_steps_planned=3, per_step_sleep_s=0, allow_stub=True,
+    )
+    _, stub_meta = load_checkpoint(tp.run())
+    assert stub_meta.rationale is None
 
 
 def test_training_pass_default_steps_match_fast_fake():
