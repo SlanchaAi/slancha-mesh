@@ -47,7 +47,10 @@ starting and stopping the process.
 2. **The ACL grant exists for the ports you serve** —
    `tag:gateway -> tag:specialist:8003,8004` (model ports) **and `:8088`**
    (the node-info / discovery port the gateway pulls). This is a one-time ACL
-   entry, not per node.
+   entry, not per node. The routability invariant follows: advertise your
+   model URL on an ACL-opened port (`:8003`/`:8004`) or the node is "up but
+   unroutable" — see the
+   [port convention](README.md#port-convention--the-routability-invariant).
 3. **Headscale only:** the `--login-server=https://<host>` URL → pass
    `--control-plane headscale --login-server <url>` to `up`.
 

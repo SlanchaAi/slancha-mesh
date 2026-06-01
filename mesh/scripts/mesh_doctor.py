@@ -522,7 +522,9 @@ def check_model_port_acl_reachable(
             detail=(
                 f"model server on {on_off} but nothing on the ACL accept-set "
                 f"{acl_ports} — the gateway ACL (tag:gateway -> "
-                f"tag:specialist:{acl_str}) cannot reach this node"
+                f"tag:specialist:{acl_str}) cannot reach this node. Invariant: "
+                f"a discoverable node's advertised model URL MUST be "
+                f"ACL-reachable, else it is 'up but unroutable'"
             ),
             fix=f"re-serve on a convention model port: `slancha-mesh up --base-port {acl_ports[0]}`",
         )

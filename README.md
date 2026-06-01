@@ -227,6 +227,34 @@ mean *opposite* things:
 Don't point a pull consumer at a push registry; pick one model per
 deployment.
 
+## Port convention — the routability invariant
+
+On a tailnet the ACL is deny-by-default, so ports are not interchangeable.
+There is **one rule** the rest of the docs assume:
+
+> **If a node says it is registered/discoverable, its advertised model URL
+> must be reachable from the documented gateway/consumer under the
+> documented ACL.**
+
+Concretely, on a Tailscale/Headscale mesh:
+
+- **`:8003` (vLLM) / `:8004` (HF)** — the model ports. These are the
+  *only* model ports the gateway ACL opens
+  (`tag:gateway -> tag:specialist:8003,8004`); `--base-port` defaults to
+  `8003` so you land here automatically. Always advertise a model URL on
+  one of these.
+- **`:8088`** — node-info / discovery only (the `/models` self-description
+  the gateway pulls). Never a model port.
+- **`:8000` (slancha-local default) / `:8001` (vLLM dev)** — *off-ACL*. A
+  node serving its model here heartbeats and registers fine but is
+  **un-routable** ("up but unroutable"): the gateway is not permitted to
+  dial it. Re-serve on `:8003` (`slancha-mesh up --base-port 8003`).
+  `slancha-mesh doctor` warns on exactly this.
+
+LAN mode (`--peer`, no Tailscale — see [`docs/HOMELAB.md`](docs/HOMELAB.md))
+has no ACL membrane, so any reachable port is fine; the invariant only
+binds where an ACL gates reachability.
+
 ## Design decisions worth remembering
 
 - **Unified-mem nodes get `RAM - 8GB OS reserve`** as their effective

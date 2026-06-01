@@ -162,6 +162,13 @@ bespoke setup.
    SSH (`:22`) stays denied to the gateway. This is a one-time ACL entry, not
    per node — no per-user CloudFront tunnel or L@E origin entry is created.
 
+   > **The routability invariant:** a node that registers/discovers must
+   > advertise its model URL on an ACL-opened port (`:8003`/`:8004`), or it
+   > is "up but unroutable." Serving on an off-ACL port (`:8000`/`:8001`)
+   > registers fine but the gateway cannot reach it — `slancha-mesh doctor`
+   > warns on this. See the
+   > [port convention](README.md#port-convention--the-routability-invariant).
+
 ### Per-specialist (you again, repeated for each model)
 
 7. **Follow Case A above** to register specialists on your node.
