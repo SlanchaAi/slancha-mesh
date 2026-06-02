@@ -398,6 +398,13 @@ class TrainingPass:
         )
         model = peft.get_peft_model(model, lora_cfg)
 
+        # Issue #65: train on the GPU when one is present (the GB10/Spark
+        # target) — `from_pretrained` lands on CPU by default, so without this
+        # the "real" pass silently runs on CPU even on a GB10. Falls back to
+        # CPU so the contract tests + CPU dev machines behave unchanged.
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device)
+
         optimizer = torch.optim.AdamW(
             (p for p in model.parameters() if p.requires_grad),
             lr=self.learning_rate,
@@ -423,6 +430,7 @@ class TrainingPass:
                 max_length=self.max_seq_len,
                 padding=False,
             )
+            batch = {k: v.to(device) for k, v in batch.items()}
             optimizer.zero_grad()
             out = model(input_ids=batch["input_ids"], labels=batch["input_ids"])
             out.loss.backward()
