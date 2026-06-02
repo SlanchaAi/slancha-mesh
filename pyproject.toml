@@ -61,6 +61,16 @@ train = [
 dashboard = [
   "streamlit>=1.30",
 ]
+loop = [
+  # The traffic-cluster → experiment-spec generator (issue #87) reuses the
+  # embedding/clustering substrate from the PUBLIC slancha-local package rather
+  # than vendoring ~1000 lines of ML code (which would be a second parity-mirror
+  # to drift, after the gate mirror). "Everything in the container": this extra
+  # bundles slancha-local INTO the mesh image so the whole loop is one
+  # deployable unit. `mesh.generator` imports it lazily — the package + test
+  # suite run without this extra installed.
+  "slancha-local @ git+https://github.com/SlanchaAi/slancha-local",
+]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
@@ -70,6 +80,12 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["mesh"]
+
+[tool.hatch.metadata]
+# The `[loop]` extra pins slancha-local by git URL (a direct reference) so the
+# generator's clustering substrate bundles into the image without a PyPI
+# release. Hatchling requires this opt-in to allow a non-PyPI dependency.
+allow-direct-references = true
 
 [tool.ruff]
 # Pin the parse target so the `ruff check mesh/` CI gate behaves the same
