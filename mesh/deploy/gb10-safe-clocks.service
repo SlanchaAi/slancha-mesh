@@ -1,0 +1,42 @@
+# GB10 safe clock cap — the #1 prerequisite before any real training pass on a
+# DGX-Spark / GB10 box (issue #65).
+#
+# WHY THIS EXISTS (read before skipping it): GB10 clock-boost under sustained
+# training load trips the chassis VRM into **overcurrent → a SILENT HARD-LOCK of
+# the whole box**. It does NOT present as an OOM or a CUDA error — it looks like
+# random training instability / a wedged node, so you will chase it as a memory
+# bug for days. Capping the GPU clocks removes the overcurrent transient. This
+# is the single highest-value safety gate for GB10 training (hard-won from the
+# forge/sunlit-aurora loop; each landmine below cost a reboot to find).
+#
+# SYSTEM-LEVEL UNIT (not --user): nvidia-smi clock/persistence control needs
+# root. Install:
+#   sudo cp mesh/deploy/gb10-safe-clocks.service /etc/systemd/system/
+#   sudo systemctl enable --now gb10-safe-clocks
+#   nvidia-smi -q -d CLOCK     # verify the cap took (SM clock max == 2100)
+#
+# Verify it's active before launching a train: `mesh-doctor` / the GB10
+# preflight checklist (docs/GB10_TRAINING_PREFLIGHT.md) checks for this.
+
+[Unit]
+Description=GB10 safe clock cap (prevent VRM overcurrent hard-lock) — issue #65
+Documentation=https://github.com/SlanchaAi/slancha-mesh/blob/main/docs/GB10_TRAINING_PREFLIGHT.md
+# Persistence daemon must be up first so -pm 1 / -lgc stick across the session.
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+# -pm 1 = persistence mode on (keeps the clock cap applied with no client
+# attached). Order matters: persistence first, then the locked-clock range.
+ExecStart=/usr/bin/nvidia-smi -pm 1
+# Lock GPU clocks to 300–2100 MHz. The upper bound is what prevents the
+# boost-into-VRM-overcurrent transient; tune the ceiling per-board only with a
+# power-draw scope, never upward blind.
+ExecStart=/usr/bin/nvidia-smi -lgc 300,2100
+# oneshot + RemainAfterExit so `systemctl status` reads active after the two
+# commands run, and the cap is treated as a satisfied dependency by train units.
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
