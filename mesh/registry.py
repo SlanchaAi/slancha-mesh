@@ -19,10 +19,12 @@ import threading
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from mesh.allocator import allocate_cluster
+from mesh.event_store import EventEnvelope, EventStore, NullEventStore
 from mesh.models import (
     DomainId,
     NodeBinding,
@@ -91,6 +93,33 @@ class QualityObservationEvent(_Event):
 Event = HeartbeatEvent | NodeLeftEvent | AllocationEvent | QualityObservationEvent
 
 
+# Registry-owned codec between the live event objects and the opaque durable
+# envelope (mesh.event_store). Kept here (not in the seam) so event schemas can
+# evolve without changing the EventStore contract.
+_EVENT_TYPES: dict[str, type[_Event]] = {
+    "heartbeat": HeartbeatEvent,
+    "node_left": NodeLeftEvent,
+    "allocation": AllocationEvent,
+    "quality_observation": QualityObservationEvent,
+}
+
+
+def _encode(ev: Event) -> EventEnvelope:
+    return EventEnvelope(
+        event_id=uuid4().hex,
+        kind=ev.kind,
+        ts=ev.ts.isoformat(),
+        payload=ev.model_dump_json(),
+    )
+
+
+def _decode(env: EventEnvelope) -> Event:
+    cls = _EVENT_TYPES.get(env.kind)
+    if cls is None:
+        raise ValueError(f"unknown event kind in durable store: {env.kind!r}")
+    return cls.model_validate_json(env.payload)
+
+
 # ---------------------------------------------------------------------------
 # Request/response schemas (FastAPI handlers on slancha-api consume these)
 # ---------------------------------------------------------------------------
@@ -153,9 +182,13 @@ class MeshRegistry:
         catalog: list[SpecialistCard] | None = None,
         *,
         max_events: int = DEFAULT_MAX_EVENTS,
+        store: EventStore | None = None,
     ) -> None:
         self._events: list[Event] = []
         self._max_events = max_events
+        # Durability seam (issue: on-prem persistence). Default = no durability
+        # (in-memory only, pre-seam behavior). A durable store survives restarts.
+        self._store: EventStore = store or NullEventStore()
         # specialist_id -> SpecialistCard, used by the snapshot to enrich
         # NodeBindings with card metadata.
         self._catalog: dict[SpecialistId, SpecialistCard] = {
@@ -166,6 +199,20 @@ class MeshRegistry:
         # Re-entrant: _compact_heartbeats is called from inside
         # record_heartbeat, which already holds the lock.
         self._lock = threading.RLock()
+        # Boot replay: rebuild the in-memory read model from the durable log
+        # (no-op for NullEventStore). Done before serving any write.
+        for env in self._store.replay():
+            self._events.append(_decode(env))
+
+    def _record(self, ev: Event) -> None:
+        """Durably persist `ev`, then add it to the in-memory read model.
+
+        Caller must hold `self._lock`. Durable-FIRST: if the store raises, the
+        read model is left untouched, so the durable log and the read model never
+        silently diverge (neither has the event; the caller sees the error).
+        """
+        self._store.append(_encode(ev))
+        self._events.append(ev)
 
     # --- ingestion ---
 
@@ -173,7 +220,7 @@ class MeshRegistry:
         with self._lock:
             if req.node_url:
                 self._node_urls[req.heartbeat.node_id] = req.node_url
-            self._events.append(
+            self._record(
                 HeartbeatEvent(ts=req.heartbeat.ts, node_url=req.node_url, heartbeat=req.heartbeat)
             )
             if len(self._events) > self._max_events:
@@ -182,7 +229,7 @@ class MeshRegistry:
 
     def record_node_left(self, node_id: NodeId, reason: str = "graceful") -> None:
         with self._lock:
-            self._events.append(
+            self._record(
                 NodeLeftEvent(ts=datetime.now(timezone.utc), node_id=node_id, reason=reason)
             )
 
@@ -190,7 +237,7 @@ class MeshRegistry:
         self, strategy: str, suggestions: dict[NodeId, SpecialistId | None]
     ) -> None:
         with self._lock:
-            self._events.append(
+            self._record(
                 AllocationEvent(ts=datetime.now(timezone.utc), strategy=strategy, suggestions=suggestions)
             )
 
@@ -222,7 +269,7 @@ class MeshRegistry:
             observation_source=observation_source,
         )
         with self._lock:
-            self._events.append(ev)
+            self._record(ev)
             prior = None
             old_card = self._catalog.get(specialist_id)
             if old_card is not None:
