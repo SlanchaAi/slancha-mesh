@@ -46,11 +46,22 @@ def test_heartbeat_replay_takes_latest(spark_node, catalog, fresh_now):
 
 
 def test_node_unreachable_after_5_min(spark_node, catalog, fresh_now):
-    reg = MeshRegistry(catalog=catalog)
+    # #102: age is measured from the SERVER receive time, so inject the clock.
+    reg = MeshRegistry(catalog=catalog, clock=lambda: fresh_now)
     hb = make_heartbeat(spark_node, fresh_now, ["qwen3-math-7b-q4"], catalog)
     reg.record_heartbeat(HeartbeatPostRequest(heartbeat=hb, node_url="http://spark-1:8000/v1"))
     snap = reg.snapshot(now=fresh_now + NODE_UNREACHABLE_AFTER + timedelta(seconds=1))
     assert snap.nodes[spark_node.node_id].health == "unreachable"
+
+
+def test_client_cannot_fake_freshness_with_future_ts(spark_node, catalog, fresh_now):
+    """#102: a node that sends a far-future heartbeat ts can't stay 'healthy'
+    forever — the server-stamped receive time governs the unreachable calc."""
+    reg = MeshRegistry(catalog=catalog, clock=lambda: fresh_now)
+    lying = make_heartbeat(spark_node, fresh_now + timedelta(hours=1), ["qwen3-math-7b-q4"], catalog)
+    reg.record_heartbeat(HeartbeatPostRequest(heartbeat=lying, node_url="http://spark-1:8000/v1"))
+    snap = reg.snapshot(now=fresh_now + NODE_UNREACHABLE_AFTER + timedelta(seconds=1))
+    assert snap.nodes[spark_node.node_id].health == "unreachable"  # server clock wins, not the node's
 
 
 def test_node_left_event_drops_node(spark_node, catalog, fresh_now):
