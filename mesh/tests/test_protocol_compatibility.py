@@ -81,10 +81,12 @@ def test_heartbeat_post_request_dumps_spec5_field_names(
     hb = make_heartbeat(spark_node, fresh_now, ["qwen3-coder-30b-a3b-fp8"], catalog)
     req = HeartbeatPostRequest(heartbeat=hb, node_url="http://spark:8001/v1")
     data = req.model_dump(mode="json")
-    # HeartbeatPostRequest is the OUTER envelope; locking its exact key set
-    # is appropriate because adding new top-level keys would be a
-    # breaking-change for every existing consumer parsing this shape.
-    assert set(data.keys()) == {"heartbeat", "node_url"}
+    # HeartbeatPostRequest is the OUTER envelope; we lock its key set so a new
+    # top-level key is a deliberate, reviewed change. `identity_cert` (#102) is an
+    # ADDITIVE optional field — defaults null, nodes opt in by sending a cert; the
+    # registry treats absence as before (TOFU-only / not-required).
+    assert set(data.keys()) == {"heartbeat", "node_url", "identity_cert"}
+    assert data["identity_cert"] is None  # additive + optional → null by default
 
 
 def test_heartbeat_post_response_dumps_expected_keys():

@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
+from mesh.identity import NodeIdentityError, verify_node_cert
 from mesh.url_guard import validate_node_url
 
 from mesh.allocator import allocate_cluster
@@ -128,6 +129,15 @@ def _decode(env: EventEnvelope) -> Event:
 # ---------------------------------------------------------------------------
 
 
+class NodeIdentityCert(BaseModel):
+    """Self-signed Ed25519 cert binding node_id ↔ public key (#102)."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+    node_id: str
+    public_key_b64: str
+    signature_b64: str
+
+
 class HeartbeatPostRequest(BaseModel):
     """Body for POST /mesh/v1/heartbeat."""
 
@@ -136,6 +146,11 @@ class HeartbeatPostRequest(BaseModel):
     node_url: str | None = Field(
         default=None,
         description="The node's OpenAI-compatible base URL. Required on first heartbeat.",
+    )
+    identity_cert: NodeIdentityCert | None = Field(
+        default=None,
+        description="Optional self-signed node identity cert (#102); when present, "
+                    "the registry verifies it and pins node_id↔key.",
     )
 
     @field_validator("node_url")
@@ -192,9 +207,16 @@ class MeshRegistry:
         max_events: int = DEFAULT_MAX_EVENTS,
         store: EventStore | None = None,
         clock: "Callable[[], datetime] | None" = None,
+        require_node_identity: bool = False,
     ) -> None:
         self._events: list[Event] = []
         self._max_events = max_events
+        # #102: node_id → pinned Ed25519 public key (TOFU). Once a node presents a
+        # valid identity cert, a later heartbeat claiming the same node_id with a
+        # different key (or no cert) is rejected. `require_node_identity` makes a
+        # valid cert MANDATORY on every heartbeat (regulated profile).
+        self._node_pubkeys: dict[NodeId, str] = {}
+        self._require_node_identity = require_node_identity
         # Server clock for stamping heartbeat receive-time (#102). Injectable so
         # tests control "now"; defaults to real UTC.
         self._clock: "Callable[[], datetime]" = clock or (lambda: datetime.now(timezone.utc))
@@ -228,8 +250,32 @@ class MeshRegistry:
 
     # --- ingestion ---
 
+    def _check_node_identity(self, req: HeartbeatPostRequest) -> None:
+        """Verify + pin the node's identity cert (#102). Caller holds the lock.
+        Raises NodeIdentityError on an invalid cert, a pin violation
+        (impersonation), a missing cert when required, or a cert-less heartbeat
+        from a node that previously authenticated (downgrade)."""
+        node_id = req.heartbeat.node_id
+        cert = req.identity_cert
+        if cert is not None:
+            if not verify_node_cert(cert.model_dump(), node_id):
+                raise NodeIdentityError(f"invalid identity cert for node {node_id!r}")
+            pinned = self._node_pubkeys.get(node_id)
+            if pinned is not None and pinned != cert.public_key_b64:
+                raise NodeIdentityError(
+                    f"node {node_id!r} is pinned to a different key — impersonation refused")
+            self._node_pubkeys[node_id] = cert.public_key_b64
+            return
+        if self._require_node_identity:
+            raise NodeIdentityError(f"node {node_id!r} must present an identity cert (required)")
+        if node_id in self._node_pubkeys:
+            raise NodeIdentityError(
+                f"node {node_id!r} previously presented an identity cert; a cert-less "
+                "heartbeat is refused (downgrade)")
+
     def record_heartbeat(self, req: HeartbeatPostRequest) -> HeartbeatPostResponse:
         with self._lock:
+            self._check_node_identity(req)
             if req.node_url:
                 self._node_urls[req.heartbeat.node_id] = req.node_url
             self._record(

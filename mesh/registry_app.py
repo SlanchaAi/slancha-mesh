@@ -217,7 +217,11 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
                 "Catalog auto-load failed; starting with empty catalog"
             )
             cards = []
-        reg = MeshRegistry(catalog=cards)
+        # #102: regulated profile can require every heartbeat to carry a valid
+        # node identity cert (env opt-in; default off / TOFU pinning only).
+        require_identity = os.environ.get("SLANCHA_REQUIRE_NODE_IDENTITY", "").strip().lower() in (
+            "1", "true", "yes", "on")
+        reg = MeshRegistry(catalog=cards, require_node_identity=require_identity)
 
     app = FastAPI(
         title="Slancha-Mesh Registry",
@@ -235,7 +239,12 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
         req: HeartbeatPostRequest,
         _: Annotated[None, Depends(verify_node_token)],
     ) -> HeartbeatPostResponse:
-        return reg.record_heartbeat(req)
+        from mesh.identity import NodeIdentityError
+
+        try:
+            return reg.record_heartbeat(req)
+        except NodeIdentityError as e:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
 
     @app.get(
         "/registry",

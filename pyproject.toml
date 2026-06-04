@@ -61,6 +61,13 @@ train = [
 dashboard = [
   "streamlit>=1.30",
 ]
+signing = [
+  # Ed25519 for node identity (#102) + eval-row/holdout signing (#104). Opt-in:
+  # mesh.identity / mesh.eval.seed_verify import it lazily, so the package + the
+  # default test suite run without it (those features just stay unavailable).
+  #   pip install -e ".[signing]"
+  "pynacl>=1.5",
+]
 loop = [
   # The traffic-cluster → experiment-spec generator (issue #87) reuses the
   # embedding/clustering substrate from the PUBLIC slancha-local package rather
