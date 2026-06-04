@@ -446,6 +446,10 @@ def cmd_router(args: argparse.Namespace) -> int:
 
     app = create_router_app(snapshot_source=holder.get)
 
+    # Fail-closed (#97): don't expose the router on a public interface unauthenticated.
+    from mesh.auth import assert_bind_safe
+    assert_bind_safe(args.bind, token_present=bool(token or os.environ.get(NODE_TOKEN_ENV)))
+
     _print(f"[router] starting on http://{args.bind}:{args.port}  "
            f"(refresh={args.refresh_s}s, peers={len(explicit_peers) or 'tailnet'}, "
            f"auth={'on' if token or os.environ.get(NODE_TOKEN_ENV) else 'off'})")

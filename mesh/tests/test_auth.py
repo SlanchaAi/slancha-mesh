@@ -74,10 +74,39 @@ def _app() -> FastAPI:
     return app
 
 
-def test_default_disabled_grants_access():
+def test_disabled_mode_refuses_role_gated_route():
+    """#97: a role-gated route must REFUSE a disabled-auth principal (RBAC theater
+    otherwise) — even though authenticate itself still returns the dev principal."""
     client = TestClient(_app())
-    assert client.get("/who").json()["actor"] == "anonymous"
-    assert client.get("/admin").status_code == 200  # dev mode = full access
+    assert client.get("/who").json()["actor"] == "anonymous"   # authenticate is permissive
+    assert client.get("/admin").status_code == 403             # require_role refuses disabled
+
+
+def test_require_role_permit_disabled_opt_in():
+    """A route can explicitly allow disabled-auth (e.g. a localhost dev tool)."""
+    app = FastAPI()
+
+    @app.get("/dev")
+    def dev(_p: Principal = Depends(require_role("admin", permit_disabled=True))):
+        return {"ok": True}
+
+    assert TestClient(app).get("/dev").status_code == 200
+
+
+def test_assert_bind_safe(monkeypatch):
+    import pytest
+
+    from mesh.auth import assert_bind_safe
+
+    monkeypatch.delenv("SLANCHA_AUTH_REQUIRED", raising=False)
+    # loopback is always fine
+    assert_bind_safe("127.0.0.1", token_present=False)
+    assert_bind_safe("localhost", token_present=False)
+    # public bind with a token is fine
+    assert_bind_safe("0.0.0.0", token_present=True)
+    # public bind, no token, no override → refuse
+    with pytest.raises(SystemExit):
+        assert_bind_safe("0.0.0.0", token_present=False)
 
 
 def test_override_authenticator_enforces_rbac():
