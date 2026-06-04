@@ -133,11 +133,22 @@ def authenticate(
         raise HTTPException(status_code=e.status_hint, detail=e.detail, headers=headers) from e
 
 
-def require_role(role: str) -> Callable[..., Principal]:
+def require_role(role: str, *, permit_disabled: bool = False) -> Callable[..., Principal]:
     """Authz dependency factory. Composes ``authenticate`` (so a route declares
-    exactly one of authenticate / require_role) and 403s if the role is absent."""
+    exactly one of authenticate / require_role) and 403s if the role is absent.
+
+    SECURITY (#97): a dev-mode/disabled-auth principal carries ``_FULL_ACCESS``,
+    so a plain role check would silently pass on a misconfigured (token-less)
+    deployment — RBAC theater. A role-gated route therefore REFUSES an
+    ``auth_method=="disabled"`` principal unless the route explicitly opts in
+    with ``permit_disabled=True``."""
 
     def _dep(principal: Annotated[Principal, Depends(authenticate)]) -> Principal:
+        if principal.auth_method == "disabled" and not permit_disabled:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="auth is disabled (no SLANCHA_NODE_TOKEN) — refusing a role-gated route",
+            )
         if role not in principal.roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -148,11 +159,35 @@ def require_role(role: str) -> Callable[..., Principal]:
     return _dep
 
 
+def _is_loopback_bind(host: str) -> bool:
+    h = (host or "").strip().lower()
+    return h in ("127.0.0.1", "localhost", "::1", "") or h.startswith("127.")
+
+
+def assert_bind_safe(bind_host: str, *, token_present: bool | None = None) -> None:
+    """Refuse to expose the control plane on a non-loopback interface with no auth
+    (#97). Call before binding a server. A loopback bind is local-only (safe); a
+    public bind needs a token, OR an explicit ``SLANCHA_AUTH_REQUIRED=false`` opt
+    out for a network the operator vouches for. Raises ``SystemExit`` otherwise."""
+    if token_present is None:
+        token_present = bool(os.environ.get(NODE_TOKEN_ENV, "").strip())
+    if token_present or _is_loopback_bind(bind_host):
+        return
+    if os.environ.get("SLANCHA_AUTH_REQUIRED", "").strip().lower() in ("0", "false", "no", "off"):
+        return
+    raise SystemExit(
+        f"refusing to bind {bind_host!r} with no {NODE_TOKEN_ENV} set — the control plane would be "
+        f"unauthenticated on a non-loopback interface. Set {NODE_TOKEN_ENV}, bind 127.0.0.1, or set "
+        f"SLANCHA_AUTH_REQUIRED=false to accept the risk on a trusted network."
+    )
+
+
 __all__ = [
     "AuthError",
     "Authenticator",
     "BearerAuthenticator",
     "Principal",
+    "assert_bind_safe",
     "authenticate",
     "get_authenticator",
     "require_role",
