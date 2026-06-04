@@ -178,15 +178,21 @@ def _rewrite_model_for_upstream(
     return dict(body)
 
 
-def _upstream_headers(authorization: str | None) -> dict[str, str]:
+def _upstream_headers() -> dict[str, str]:
     """Headers to forward to the upstream node.
 
-    Forwards the caller's bearer (so a node behind its own token gate
-    accepts the proxied request) and sets a clean Content-Type.
+    SECURITY (#99): never relay the *client's* Authorization to upstream nodes.
+    The fallback chain tries multiple nodes, so a single malicious/compromised
+    node could return a retriable 5xx to force fallback and harvest every
+    caller's bearer (or a real upstream API key passed through by an OpenAI
+    client). If the upstream nodes require a credential, configure a SEPARATE
+    one via ``SLANCHA_UPSTREAM_TOKEN`` (sent as a Bearer); otherwise no
+    Authorization is sent (local inference servers typically need none).
     """
     h = {"Content-Type": "application/json"}
-    if authorization:
-        h["Authorization"] = authorization
+    upstream = os.environ.get("SLANCHA_UPSTREAM_TOKEN", "").strip()
+    if upstream:
+        h["Authorization"] = f"Bearer {upstream}"
     return h
 
 
@@ -356,7 +362,6 @@ async def _proxy_stream_with_fallback(
     bindings: list[NodeBinding],
     specialist_id: str,
     upstream_body: dict,
-    authorization: str | None,
 ) -> StreamingResponse:
     """Open a streaming request, falling through the binding chain on failure.
 
@@ -388,7 +393,7 @@ async def _proxy_stream_with_fallback(
             "POST",
             upstream_url,
             json=upstream_body,
-            headers=_upstream_headers(authorization),
+            headers=_upstream_headers(),
         )
         try:
             response = await stream_ctx.__aenter__()
@@ -532,7 +537,6 @@ def create_router_app(
     async def chat_completions(
         request: Request,
         _: Annotated[None, Depends(verify_router_token)],
-        authorization: Annotated[str | None, Header()] = None,
     ) -> Response:
         try:
             body = await request.json()
@@ -572,7 +576,6 @@ def create_router_app(
                 bindings=bindings,
                 specialist_id=specialist_id,
                 upstream_body=upstream_body,
-                authorization=authorization,
             )
 
         # Non-streaming fallback chain: try each binding in order; first
@@ -585,7 +588,7 @@ def create_router_app(
                 upstream = await client.post(
                     upstream_url,
                     json=upstream_body,
-                    headers=_upstream_headers(authorization),
+                    headers=_upstream_headers(),
                 )
             except (httpx.HTTPError, OSError) as exc:
                 last_detail = f"{exc.__class__.__name__} at {upstream_url}"

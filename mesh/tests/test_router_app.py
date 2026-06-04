@@ -291,8 +291,11 @@ def test_chat_completions_sets_routing_audit_headers():
     assert "queue_depth=3" in r.headers["X-Slancha-Reason"]
 
 
-def test_chat_completions_forwards_authorization_to_upstream():
-    """SLANCHA_NODE_TOKEN on the node side must still accept proxied calls."""
+def test_chat_completions_does_not_forward_client_bearer_to_upstream(monkeypatch):
+    """SECURITY (#99): the client's Authorization must NEVER be relayed upstream
+    — a malicious node in the fallback chain would harvest every caller's bearer.
+    With no SLANCHA_UPSTREAM_TOKEN configured, no Authorization is sent."""
+    monkeypatch.delenv("SLANCHA_UPSTREAM_TOKEN", raising=False)
     snap = _snapshot(
         cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
         bindings={
@@ -312,10 +315,39 @@ def test_chat_completions_forwards_authorization_to_upstream():
     r = client.post(
         "/v1/chat/completions",
         json={"model": "qwen2.5-coder-7b-q4-ollama", "messages": []},
-        headers={"Authorization": "Bearer node-secret"},
+        headers={"Authorization": "Bearer client-secret-do-not-leak"},
     )
     assert r.status_code == 200
-    assert captured["authorization"] == "Bearer node-secret"
+    assert captured["authorization"] is None  # client bearer NOT forwarded
+
+
+def test_chat_completions_uses_configured_upstream_token(monkeypatch):
+    """If the upstream nodes gate on a credential, the router sends a SEPARATE
+    configured token — never the client's."""
+    monkeypatch.setenv("SLANCHA_UPSTREAM_TOKEN", "node-secret")
+    snap = _snapshot(
+        cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+        bindings={
+            "qwen2.5-coder-7b-q4-ollama": [
+                _binding(specialist_id="qwen2.5-coder-7b-q4-ollama")
+            ]
+        },
+    )
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request):
+        captured["authorization"] = request.headers.get("authorization")
+        return (200, {"id": "ok"}, None)
+
+    client = _client(snap, handler)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "qwen2.5-coder-7b-q4-ollama", "messages": []},
+        headers={"Authorization": "Bearer client-secret-do-not-leak"},
+    )
+    assert r.status_code == 200
+    assert captured["authorization"] == "Bearer node-secret"  # configured, not client's
 
 
 # ---------------------------------------------------------------------------
