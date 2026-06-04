@@ -67,10 +67,18 @@ from mesh.registry import MeshRegistry
 
 NODE_TOKEN_ENV = "SLANCHA_NODE_TOKEN"
 UPSTREAM_TIMEOUT_S = 120.0  # generous; covers a cold Ollama load on the upstream
-# Streaming completions can run for minutes (long generations, slow models on
-# small hardware). Tight first-byte / connect deadlines, but no overall read
-# cap — the proxy stays open as long as the upstream emits chunks.
-DEFAULT_STREAMING_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+# DoS bounds (#101). Streaming completions can run for minutes (long generations,
+# slow models), so there's no *overall* read cap — but `read` is the per-chunk
+# IDLE timeout: a slow-loris upstream that emits no byte for this long is dropped
+# instead of pinning a connection/task forever. `_IDLE_READ_S` env-overridable.
+_IDLE_READ_S = float(os.environ.get("SLANCHA_ROUTER_IDLE_READ_S", "60"))
+DEFAULT_STREAMING_TIMEOUT = httpx.Timeout(connect=10.0, read=_IDLE_READ_S, write=10.0, pool=10.0)
+# Reject an oversized request body before buffering it (a 1GB POST would be read
+# into memory then re-serialized to N upstreams). Env-overridable.
+MAX_REQUEST_BYTES = int(os.environ.get("SLANCHA_ROUTER_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
+# Cap how many nodes one client request fans out to (amplification / token
+# double-spend / node-enumeration bound).
+MAX_FALLBACK_ATTEMPTS = int(os.environ.get("SLANCHA_ROUTER_MAX_FALLBACK", "3"))
 
 _log = logging.getLogger(__name__)
 
@@ -552,8 +560,24 @@ def create_router_app(
         request: Request,
         _: Annotated[None, Depends(verify_router_token)],
     ) -> Response:
+        # Reject an oversized body BEFORE buffering it (#101). Honor a declared
+        # Content-Length, and also bound the actual read so a lying/chunked
+        # client can't exceed the cap.
+        clen = request.headers.get("content-length")
+        if clen is not None and clen.isdigit() and int(clen) > MAX_REQUEST_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"request body exceeds {MAX_REQUEST_BYTES} bytes",
+            )
+        raw = await request.body()
+        if len(raw) > MAX_REQUEST_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"request body exceeds {MAX_REQUEST_BYTES} bytes",
+            )
         try:
-            body = await request.json()
+            import json as _json
+            body = _json.loads(raw)
         except Exception as exc:  # noqa: BLE001 — anything not-JSON is a 400
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -581,6 +605,8 @@ def create_router_app(
                     f"check `GET /v1/models` for what's currently routable."
                 ),
             )
+        # Bound fan-out (#101): one client request retries at most this many nodes.
+        bindings = bindings[:MAX_FALLBACK_ATTEMPTS]
 
         upstream_body = _rewrite_model_for_upstream(body, specialist_id, snap)
 

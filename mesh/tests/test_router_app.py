@@ -898,3 +898,36 @@ def test_upstream_content_type_is_allowlisted(monkeypatch):
                     json={"model": "qwen2.5-coder-7b-q4-ollama", "messages": []})
     assert r.status_code == 200
     assert "text/html" not in r.headers.get("content-type", "")
+
+
+def test_oversized_body_rejected_413(monkeypatch):
+    """#101: a body over MAX_REQUEST_BYTES is refused before buffering/fan-out."""
+    import mesh.router_app as ra
+    monkeypatch.setattr(ra, "MAX_REQUEST_BYTES", 100)
+    snap = _snapshot(cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+                     bindings={"qwen2.5-coder-7b-q4-ollama": [_binding(specialist_id="qwen2.5-coder-7b-q4-ollama")]})
+    client = _client(snap, lambda r: (200, {"id": "ok"}, None))
+    big = {"model": "qwen2.5-coder-7b-q4-ollama", "messages": [{"role": "user", "content": "x" * 500}]}
+    assert client.post("/v1/chat/completions", json=big).status_code == 413
+
+
+def test_fallback_is_capped(monkeypatch):
+    """#101: fan-out is bounded — a request hits at most MAX_FALLBACK_ATTEMPTS nodes."""
+    import mesh.router_app as ra
+    monkeypatch.setattr(ra, "MAX_FALLBACK_ATTEMPTS", 2)
+    # 5 reachable bindings all returning a retriable 503.
+    bindings = [_binding(specialist_id="qwen2.5-coder-7b-q4-ollama", node_id=f"n{i}",
+                         node_url=f"http://10.0.0.{i}:8003") for i in range(5)]
+    snap = _snapshot(cards=[_card(specialist_id="qwen2.5-coder-7b-q4-ollama")],
+                     bindings={"qwen2.5-coder-7b-q4-ollama": bindings})
+    hits = {"n": 0}
+
+    def handler(request):
+        hits["n"] += 1
+        return (503, {"error": "busy"}, None)
+
+    client = _client(snap, handler)
+    r = client.post("/v1/chat/completions",
+                    json={"model": "qwen2.5-coder-7b-q4-ollama", "messages": []})
+    assert r.status_code == 502          # all (capped) attempts failed
+    assert hits["n"] == 2                # NOT 5 — fan-out capped
