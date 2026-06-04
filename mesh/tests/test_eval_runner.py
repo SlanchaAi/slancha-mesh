@@ -376,3 +376,22 @@ def test_httpx_dispatcher_content_not_str_raises(monkeypatch):
     monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeHttpResp(200, body))
     with pytest.raises(EndpointError, match="not text"):
         _dispatcher().dispatch("q")
+
+
+def test_main_env_requires_signed_seed(tmp_path, monkeypatch):
+    """#104: SLANCHA_REQUIRE_SIGNED_SEED=1 enforces signature even without the
+    --require-signed-seed flag — an unsigned seed is rejected before any network."""
+    from mesh.eval.holdout import write_holdout
+    from mesh.eval.runner import main
+
+    out = tmp_path / "seed.jsonl"
+    records = [{"prompt_id": "general-0", "prompt_text": "q", "signals": {"domain": "general"}}]
+    manifest = write_holdout(out, records, holdout_version=1, seed=0)
+    mpath = out.with_suffix(".manifest.json")
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setenv("SLANCHA_REQUIRE_SIGNED_SEED", "1")
+    rc = main(["--corpus", str(out), "--manifest", str(mpath),
+                "--endpoint", "http://x", "--model", "m", "--judge-model", "j",
+                "--router-version", "v1"])
+    assert rc == 2  # signature required + unsigned/no-trusted-signers → verification fails

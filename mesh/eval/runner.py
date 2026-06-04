@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -451,16 +452,33 @@ def main(argv: list[str] | None = None) -> int:
             print(f"failed to load trusted_signers: {exc}", file=sys.stderr)
             return 3
 
+    # #104: require a signed seed via the flag OR a regulated-profile env var, so
+    # an operator pins enforcement once instead of remembering --require-signed-seed
+    # on every invocation.
+    require_sig = args.require_signed_seed or (
+        os.environ.get("SLANCHA_REQUIRE_SIGNED_SEED", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
     try:
         seed = load_verified_holdout(
             args.corpus,
             args.manifest,
-            require_signature=args.require_signed_seed,
+            require_signature=require_sig,
             trusted_signers=trusted,
         )
     except SeedVerificationError as exc:
         print(f"[runner] seed verification failed: {exc}", file=sys.stderr)
         return 2
+    if not require_sig:
+        # sha256 alone doesn't stop a local writer who swaps the seed AND
+        # regenerates the manifest hash — surface it (the finding: signature off
+        # by default was silent). Loud, not fatal.
+        print(
+            "[runner] WARNING: holdout seed loaded with sha256 integrity ONLY (no ed25519 "
+            "signature). A local writer could swap the seed and regenerate the manifest hash. "
+            "Set SLANCHA_REQUIRE_SIGNED_SEED=1 + --trusted-signers in a regulated deployment.",
+            file=sys.stderr,
+        )
 
     from mesh.quality_probe import LocalJudgeScorer
 
