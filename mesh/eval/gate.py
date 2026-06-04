@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -275,6 +276,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-n-eval", type=int, default=DEFAULT_MIN_N_EVAL)
     ap.add_argument("--allow-judge-mismatch", action="store_true",
                     help="Compare across judge_model values (default refuses)")
+    ap.add_argument("--require-signed-rows", action="store_true",
+                    help="Refuse a champion/challenger eval row lacking a valid HMAC "
+                         "(key from SLANCHA_EVAL_HMAC_KEY) — defeats a forged meta_stub (#104)")
     ap.add_argument("--promotions-log", type=Path,
                     default=Path("dashboard/promotions.jsonl"),
                     help="Append target for the verdict event log "
@@ -290,6 +294,26 @@ def main(argv: list[str] | None = None) -> int:
 
     champion = _latest_row_for_version(rows, args.champion)
     challenger = _latest_row_for_version(rows, args.challenger)
+
+    # #104: in the regulated profile, refuse rows that aren't HMAC-signed by a
+    # trusted key — a local writer can't then forge a row (e.g. meta_stub=false)
+    # to push a candidate through. Key is opaque bytes (Vault-resolved in Kanpai).
+    require_signed = args.require_signed_rows or (
+        os.environ.get("SLANCHA_REQUIRE_SIGNED_ROWS", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    if require_signed:
+        from mesh.eval.row_sign import verify_eval_row
+
+        key = os.environ.get("SLANCHA_EVAL_HMAC_KEY", "").strip().encode()
+        if not key:
+            print("[gate] --require-signed-rows but SLANCHA_EVAL_HMAC_KEY is unset", file=sys.stderr)
+            return 2
+        for label, row in (("champion", champion), ("challenger", challenger)):
+            if not verify_eval_row(row, key):
+                print(f"[gate] {label} eval row failed HMAC verification (forged/unsigned) — refusing",
+                      file=sys.stderr)
+                return 2
 
     thresholds = GateThresholds(
         mean_score_delta=args.mean_score_delta,

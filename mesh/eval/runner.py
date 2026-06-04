@@ -384,11 +384,16 @@ def run_eval_pass(
     )
 
 
-def append_pass(output: Path, ep: EvalPass) -> None:
-    """Append one EvalPass to `output` as a JSONL row."""
+def append_pass(output: Path, ep: EvalPass, *, hmac_key: bytes | None = None) -> None:
+    """Append one EvalPass to `output` as a JSONL row. When `hmac_key` is set, the
+    row carries a keyed HMAC so the gate can refuse a forged/injected row (#104)."""
     output.parent.mkdir(parents=True, exist_ok=True)
+    row = ep.to_row()
+    if hmac_key is not None:
+        from mesh.eval.row_sign import eval_row_hmac
+        row["row_hmac"] = eval_row_hmac(row, hmac_key)
     with output.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(ep.to_row(), ensure_ascii=False) + "\n")
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 # ───────────────────────────── CLI ──────────────────────────────────────────
@@ -503,7 +508,8 @@ def main(argv: list[str] | None = None) -> int:
         base_model_fingerprint=args.base_model_fingerprint,
         router_config_hash=args.router_config_hash,
     )
-    append_pass(args.output, ep)
+    _eval_key = os.environ.get("SLANCHA_EVAL_HMAC_KEY", "").strip()
+    append_pass(args.output, ep, hmac_key=_eval_key.encode() if _eval_key else None)
     print(
         f"[runner] {ep.n_eval} prompts → mean={ep.mean_score:.3f} "
         f"median={ep.median_score:.3f} acc={ep.pct_acceptable:.2%} "
