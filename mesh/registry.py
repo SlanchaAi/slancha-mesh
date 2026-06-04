@@ -21,7 +21,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from mesh.url_guard import validate_node_url
 
 from mesh.allocator import allocate_cluster
 from mesh.event_store import EventEnvelope, EventStore, NullEventStore
@@ -134,6 +136,11 @@ class HeartbeatPostRequest(BaseModel):
         default=None,
         description="The node's OpenAI-compatible base URL. Required on first heartbeat.",
     )
+
+    @field_validator("node_url")
+    @classmethod
+    def _safe_node_url(cls, v: str | None) -> str | None:
+        return validate_node_url(v) if v else v  # SSRF guard (#98)
 
 
 class HeartbeatPostResponse(BaseModel):

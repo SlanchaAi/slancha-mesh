@@ -13,7 +13,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from mesh.url_guard import validate_node_url
 
 # Newtype-ish aliases — kept as plain str for Pydantic compat.
 NodeId = str
@@ -197,6 +199,11 @@ class LoadedModel(_Frozen):
     # None → the registry falls back to the node-level HeartbeatPostRequest
     # node_url (back-compat with nodes that don't set this).
     node_url: str | None = None
+
+    @field_validator("node_url")
+    @classmethod
+    def _safe_node_url(cls, v: str | None) -> str | None:
+        return validate_node_url(v) if v else v  # SSRF guard (#98)
 
 
 class NodeUtilization(_Frozen):
