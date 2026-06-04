@@ -120,6 +120,31 @@ class ScorerError(Exception):
     """
 
 
+# Match a STANDALONE 0–5 digit (not part of a larger number / decimal). The
+# judge is instructed to reply with only the integer; this is the parse of THAT
+# constrained output — not an attempt to grade adversarial prose with a regex.
+_SCORE_DIGIT = re.compile(r"(?<!\d)([0-5])(?!\d)")
+
+
+def _parse_judge_score(content: str) -> float:
+    """Extract the 0–5 score from a judge reply (#103).
+
+    The old parse — first integer ANYWHERE, then clamp to 0–5 — silently turned a
+    bogus "42"/"9" into 5 (masking a judge that ignored the 0–5 contract). Now: a
+    clean integer-only reply wins; otherwise the first STANDALONE 0–5 digit (so
+    "3 out of 5" → 3, while "42" / "0.5" / "9" have no standalone 0–5 digit and
+    raise rather than silently clamp). The judge is instructed to reply with only
+    the integer; structured/function-call output is the stronger long-term fix
+    (tracked) — this just makes the parse of that constrained reply unambiguous."""
+    s = content.strip()
+    if s in {"0", "1", "2", "3", "4", "5"}:
+        return float(s)
+    matches = _SCORE_DIGIT.findall(s)
+    if not matches:
+        raise ScorerError(f"no 0-5 score in judge reply: {content!r}")
+    return float(matches[0])
+
+
 class LocalJudgeScorer:
     """LLM-as-judge scorer against a local OpenAI-compatible endpoint.
 
@@ -189,10 +214,7 @@ class LocalJudgeScorer:
             raise ScorerError("judge response missing assistant content") from exc
         if not isinstance(content, str):
             raise ScorerError("judge content is not text")
-        m = re.search(r"\d+", content)
-        if m is None:
-            raise ScorerError(f"no integer in judge reply: {content!r}")
-        return max(0.0, min(5.0, float(int(m.group()))))
+        return _parse_judge_score(content)
 
 
 # ── Probe observation ──────────────────────────────────────────────────────

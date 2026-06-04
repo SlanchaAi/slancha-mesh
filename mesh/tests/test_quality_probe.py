@@ -129,11 +129,28 @@ def test_local_judge_scorer_parses_integer(monkeypatch):
     assert scorer.score(DEFAULT_PROBE_SET[0], "some response") == 4.0
 
 
-def test_local_judge_scorer_clamps_above_five(monkeypatch):
-    """A judge that emits '9' is clamped to the 5.0 ceiling."""
-    _stub_httpx_post(monkeypatch, status_code=200, content="9")
+def test_local_judge_scorer_rejects_out_of_range(monkeypatch):
+    """#103: a judge that violates the 0-5 contract ('9'/'42') is an ERROR, not a
+    silent clamp to 5 (which masked a broken/gamed judge)."""
     scorer = LocalJudgeScorer(base_url="http://localhost:11434", model="judge")
-    assert scorer.score(DEFAULT_PROBE_SET[0], "great answer") == 5.0
+    for bad in ("9", "42"):
+        _stub_httpx_post(monkeypatch, status_code=200, content=bad)
+        with pytest.raises(ScorerError):
+            scorer.score(DEFAULT_PROBE_SET[0], "great answer")
+
+
+def test_judge_score_parse_robustness():
+    """#103: clean integer wins; first standalone 0-5 digit otherwise; multi-digit
+    / decimal-only is rejected (no silent clamp)."""
+    from mesh.quality_probe import _parse_judge_score
+
+    assert _parse_judge_score("4") == 4.0
+    assert _parse_judge_score("  3\n") == 3.0
+    assert _parse_judge_score("3 out of 5") == 3.0   # verdict, not the scale max
+    assert _parse_judge_score("I rate this a 2.") == 2.0   # trailing period ok
+    for bad in ("9", "42", "no number", "10"):              # multi-digit/out-of-range → error
+        with pytest.raises(ScorerError):
+            _parse_judge_score(bad)
 
 
 def test_local_judge_scorer_raises_on_non_2xx(monkeypatch):
