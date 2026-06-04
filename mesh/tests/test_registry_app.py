@@ -255,14 +255,14 @@ def test_gpu_reserve_rejects_non_numeric_gb(monkeypatch):
     # `gb_requested: "lots"` previously hit float() → uncaught ValueError → 500.
     client = _new_client(monkeypatch)
     resp = client.post("/gpu/reserve", json={"gb_requested": "lots"})
-    assert resp.status_code == 400
+    assert resp.status_code == 422  # Pydantic-typed body (#107)
 
 
 def test_gpu_reserve_rejects_null_gb(monkeypatch):
     # Explicit null → float(None) → TypeError → 500 before the fix.
     client = _new_client(monkeypatch)
     resp = client.post("/gpu/reserve", json={"gb_requested": None})
-    assert resp.status_code == 400
+    assert resp.status_code == 422  # Pydantic-typed body (#107)
 
 
 # ---------------------------------------------------------------------------
@@ -287,3 +287,17 @@ def test_mesh_service_shim_reexports_and_warns():
     assert shim.app is registry_app.app
     assert shim.create_mesh_app is registry_app.create_mesh_app
     assert shim.NODE_TOKEN_ENV == registry_app.NODE_TOKEN_ENV
+
+
+def test_allocate_rejects_unknown_strategy(monkeypatch):
+    """#107: an unknown strategy is rejected (was silently treated as 'tiered'
+    and the attacker string persisted to the event log)."""
+    client = _new_client(monkeypatch)
+    resp = client.post("/allocate", json={"strategy": "DESTROY"})
+    assert resp.status_code == 422
+
+
+def test_gpu_reserve_rejects_absurd_gb(monkeypatch):
+    """#107: gb_requested is bounded (no NaN/inf scoring)."""
+    client = _new_client(monkeypatch)
+    assert client.post("/gpu/reserve", json={"gb_requested": 1e9}).status_code == 422

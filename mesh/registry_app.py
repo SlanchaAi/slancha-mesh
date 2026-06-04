@@ -29,7 +29,7 @@ from __future__ import annotations
 import hmac
 import os
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -95,7 +95,10 @@ class AllocateRequest(BaseModel):
     """Body for `POST /allocate`."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    strategy: str = "tiered"
+    # Constrained to the known strategies (mirrors mesh.allocator.Strategy):
+    # an unknown value was silently treated as "tiered" AND the attacker string
+    # was persisted verbatim into the durable event log (#107).
+    strategy: Literal["best_per_machine", "full_set", "tiered"] = "tiered"
     traffic_mix: dict[DomainId, float] | None = None
 
 
@@ -132,6 +135,21 @@ class QualityObservationResponse(BaseModel):
     ack: bool
     prior_score: float | None
     drift: dict | None = None
+
+
+class GpuReserveRequest(BaseModel):
+    """Body for `POST /gpu/reserve` — typed + bounded (#107).
+
+    Replaces an untyped `dict` whose fields were `.get()`-ed unvalidated: a huge
+    `gb_requested` produced NaN/inf in scoring, a huge `hardware_tags` list made
+    the node filter O(n²), and `duration_s` could be any type."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    gb_requested: float = Field(..., gt=0.0, le=100_000.0)
+    node_id: NodeId | None = None
+    duration_s: int = Field(default=3600, gt=0, le=7 * 24 * 3600)
+    purpose: str = Field(default="", max_length=256)
+    hardware_tags: list[str] = Field(default_factory=list, max_length=32)
 
 
 class HealthResponse(BaseModel):
@@ -453,7 +471,7 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
         summary="Cluster-aware GPU reservation (registers intent)",
     )
     def post_gpu_reserve(
-        body: dict,
+        body: GpuReserveRequest,
         _: Annotated[None, Depends(verify_node_token)],
     ) -> dict:
         """Register a cluster-level reservation intent.
@@ -489,17 +507,9 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
                 }
         view = build_cluster_view_from_heartbeats(list(latest.values()))
 
-        try:
-            gb = float(body.get("gb_requested", 0))
-        except (TypeError, ValueError):
-            raise HTTPException(
-                status_code=400, detail="gb_requested must be a number"
-            ) from None
-        if gb <= 0:
-            raise HTTPException(status_code=400, detail="gb_requested must be > 0")
-
-        target_node = body.get("node_id")
-        require_tags = body.get("hardware_tags")
+        gb = body.gb_requested  # validated > 0, <= 100000 by the model
+        target_node = body.node_id
+        require_tags = body.hardware_tags or None
 
         if target_node is None:
             result = pick_best_node(
@@ -520,11 +530,11 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
         return {
             "chosen_node_id": target_node,
             "gb_requested": gb,
-            "duration_s": body.get("duration_s"),
+            "duration_s": body.duration_s,
             "claim_command": (
                 f"ssh {target_node} -- mesh-gpu reserve "
-                f"--gb {gb} --duration {body.get('duration_s', 3600)}s "
-                f"--purpose {body.get('purpose', '')!r}"
+                f"--gb {gb} --duration {body.duration_s}s "
+                f"--purpose {body.purpose!r}"
             ),
             "note": "v0.0.6 returns intent only; v0.0.7 will fan out to node",
         }
