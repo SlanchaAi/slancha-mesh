@@ -196,3 +196,55 @@ def test_sink_failure_never_breaks_the_promotion_record(tmp_path: Path):
     ok, err = verify_chain(_log(tmp_path))  # local record is durable + valid
     assert ok, err
     assert errors == [("RuntimeError", 0)]  # failure surfaced, not swallowed silently
+
+
+# ───────────────────────── keyed chain + external anchor (#100) ──────────────
+def test_keyed_chain_verifies_with_key_and_rejects_without(tmp_path: Path):
+    key = b"audit-hmac-key-held-outside-the-db"
+    rec = AuditRecorder(_log(tmp_path), hmac_key=key)
+    for _ in range(3):
+        rec.record(_Verdict())
+    assert verify_chain(_log(tmp_path), hmac_key=key) == (True, None)
+    # Verifying a KEYED log without the key (or wrong key) must fail.
+    ok, err = verify_chain(_log(tmp_path))
+    assert not ok
+    ok, err = verify_chain(_log(tmp_path), hmac_key=b"wrong-key")
+    assert not ok
+
+
+def test_keyed_chain_defeats_rechain_attack(tmp_path: Path):
+    """A file-level attacker edits a row and naively re-hashes with plain SHA-256;
+    the keyed verify recomputes HMAC and catches it."""
+    import hashlib
+    import json as _json
+
+    key = b"k"
+    rec = AuditRecorder(_log(tmp_path), hmac_key=key)
+    for _ in range(3):
+        rec.record(_Verdict())
+    rows = _rows(_log(tmp_path))
+    rows[1]["mean_delta"] = 9.9  # tamper
+    body = {k: v for k, v in rows[1].items() if k != "row_hash"}
+    canon = _json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    rows[1]["row_hash"] = "sha256:" + hashlib.sha256(canon.encode()).hexdigest()  # attacker w/o key
+    _log(tmp_path).write_text("\n".join(_json.dumps(r) for r in rows) + "\n")
+    ok, err = verify_chain(_log(tmp_path), hmac_key=key)
+    assert not ok and "row_hash mismatch" in err
+
+
+def test_external_anchor_detects_truncation(tmp_path: Path):
+    rec = AuditRecorder(_log(tmp_path), hmac_key=b"k")
+    for _ in range(4):
+        rec.record(_Verdict())
+    last_seq, tip = rec.tip
+    assert last_seq == 3
+    # Truncate the tail (a valid prefix still verifies WITHOUT the anchor).
+    rows = _rows(_log(tmp_path))[:2]
+    import json as _json
+    _log(tmp_path).write_text("\n".join(_json.dumps(r) for r in rows) + "\n")
+    assert verify_chain(_log(tmp_path), hmac_key=b"k")[0] is True            # blind to truncation
+    # With the external anchor it is caught.
+    ok, err = verify_chain(_log(tmp_path), hmac_key=b"k", expected_tip=tip)
+    assert not ok and "tip" in err
+    ok, err = verify_chain(_log(tmp_path), hmac_key=b"k", expected_count=4)
+    assert not ok and "truncated" in err

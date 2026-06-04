@@ -35,6 +35,7 @@ Design notes (from a security/SRE/architect review):
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import threading
 import unicodedata
@@ -76,8 +77,18 @@ def _canonical(row: dict[str, Any]) -> str:
     return json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _row_hash(row_without_hash: dict[str, Any]) -> str:
-    return "sha256:" + hashlib.sha256(_canonical(row_without_hash).encode("utf-8")).hexdigest()
+def _row_hash(row_without_hash: dict[str, Any], hmac_key: bytes | None = None) -> str:
+    """Chain link for a row. Plain SHA-256 by default (back-compat / OSS); a
+    KEYED HMAC-SHA256 when an ``hmac_key`` is configured (#100).
+
+    Why keyed matters: a plain hash is recomputable by anyone, so a DB/file-level
+    attacker can edit a row and re-chain the whole tail undetected. With a key the
+    attacker can't forge a valid ``row_hash`` for an edited row, so ``verify_chain``
+    (run with the same key, held OUTSIDE the DB admin's reach) catches the edit."""
+    data = _canonical(row_without_hash).encode("utf-8")
+    if hmac_key is not None:
+        return "hmac-sha256:" + hmac.new(hmac_key, data, hashlib.sha256).hexdigest()
+    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def _clean_actor(actor: str) -> str:
@@ -102,17 +113,30 @@ class AuditRecorder:
         self,
         output: Path,
         *,
+        hmac_key: bytes | None = None,
         sink: AuditSink | None = None,
         on_sink_error: Any = None,
     ) -> None:
         self.output = Path(output)
         self.output.parent.mkdir(parents=True, exist_ok=True)
+        # When set, the chain is keyed (HMAC) — tamper-resistant against an
+        # attacker who can write the file/DB but does NOT hold the key. Keep the
+        # key outside the audit store's admin domain (HSM / KMS / separate secret).
+        self._hmac_key = hmac_key
         self._sink = sink
         # Called as on_sink_error(exc, row) when a sink raises; defaults to a
         # stderr warning. Never re-raises into the promotion path.
         self._on_sink_error = on_sink_error or _default_sink_error
         self._lock = threading.Lock()
         self._seq, self._prev = self._resume()
+
+    @property
+    def tip(self) -> tuple[int, str]:
+        """``(last_seq, last_row_hash)`` — the chain head. Persist this to an
+        EXTERNAL witness (a store the DB admin can't rewrite) and pass it to
+        ``verify_chain(expected_tip=..., expected_count=...)`` to detect a
+        truncation of the tail (which an internal-only chain cannot catch)."""
+        return self._seq - 1, self._prev
 
     def _resume(self) -> tuple[int, str]:
         """Read the existing log's tail to continue seq + chain; (0, genesis) for
@@ -157,7 +181,7 @@ class AuditRecorder:
             if context is not None:
                 row["audit_context"] = context
             row["prev_row_hash"] = self._prev
-            row["row_hash"] = _row_hash(row)
+            row["row_hash"] = _row_hash(row, self._hmac_key)
 
             line = _canonical(row)
             if "\n" in line or "\r" in line:  # defense; json.dumps escapes these
@@ -199,19 +223,33 @@ def _default_sink_error(exc: Exception, row: dict[str, Any]) -> None:
     )
 
 
-def verify_chain(path: Path) -> tuple[bool, str | None]:
+def verify_chain(
+    path: Path,
+    *,
+    hmac_key: bytes | None = None,
+    expected_tip: str | None = None,
+    expected_count: int | None = None,
+) -> tuple[bool, str | None]:
     """Verify an audit log's integrity end-to-end.
 
     Returns (True, None) if every row's `row_hash` recomputes, the chain links
     (`prev_row_hash` == prior `row_hash`), and `seq` increments by one with no
     gaps. Otherwise (False, "<reason at seq N>"). This is what an auditor (or a
     test) runs to prove the log was not edited or had rows removed.
+
+    Pass ``hmac_key`` to verify a KEYED chain (must match the recorder's key).
+
+    TRUNCATION (#100): an internal chain can't detect that the *tail* was deleted
+    — a valid prefix still verifies. Pass ``expected_tip`` (the last `row_hash`)
+    and/or ``expected_count`` (the row count) from an EXTERNAL witness to catch a
+    truncated or rewound log.
     """
     if not path.exists():
         return False, "log does not exist"
     prev = _GENESIS
     expected_seq = 0
     saw_any = False
+    last_hash = _GENESIS
     with path.open("r", encoding="utf-8") as f:
         for lineno, line in enumerate(f, 1):
             line = line.strip()
@@ -223,17 +261,22 @@ def verify_chain(path: Path) -> tuple[bool, str | None]:
             except json.JSONDecodeError as e:
                 return False, f"line {lineno}: malformed JSON ({e})"
             stored = row.get("row_hash")
-            recomputed = _row_hash({k: v for k, v in row.items() if k != "row_hash"})
+            recomputed = _row_hash({k: v for k, v in row.items() if k != "row_hash"}, hmac_key)
             if stored != recomputed:
-                return False, f"seq {row.get('seq')}: row_hash mismatch (row edited)"
+                return False, f"seq {row.get('seq')}: row_hash mismatch (row edited or wrong key)"
             if row.get("prev_row_hash") != prev:
                 return False, f"seq {row.get('seq')}: broken chain (row inserted/removed)"
             if row.get("seq") != expected_seq:
                 return False, f"line {lineno}: seq gap (expected {expected_seq}, got {row.get('seq')})"
             prev = stored
+            last_hash = stored
             expected_seq += 1
     if not saw_any:
         return False, "log is empty"
+    if expected_count is not None and expected_seq != expected_count:
+        return False, f"row count {expected_seq} != expected {expected_count} (log truncated/extended)"
+    if expected_tip is not None and last_hash != expected_tip:
+        return False, "chain tip != expected (log truncated or rewound)"
     return True, None
 
 
