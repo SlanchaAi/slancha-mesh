@@ -301,3 +301,39 @@ def test_gpu_reserve_rejects_absurd_gb(monkeypatch):
     """#107: gb_requested is bounded (no NaN/inf scoring)."""
     client = _new_client(monkeypatch)
     assert client.post("/gpu/reserve", json={"gb_requested": 1e9}).status_code == 422
+
+
+def test_quality_observation_requires_probe_token_when_set(monkeypatch):
+    """#105: with SLANCHA_PROBE_TOKEN set, /quality_observation requires it — the
+    shared node token (held by every inference node) is no longer sufficient."""
+    monkeypatch.setenv("SLANCHA_NODE_TOKEN", "node-tok")
+    monkeypatch.setenv("SLANCHA_PROBE_TOKEN", "probe-tok")
+    from mesh.registry_app import create_mesh_app
+    from fastapi.testclient import TestClient
+
+    client = TestClient(create_mesh_app())
+    body = {"specialist_id": "qwen2.5-coder-7b-q4-ollama", "score": 5.0,
+            "sample_count": 10, "observation_source": "real_traffic"}
+    # the node token (a compromised node has this) is rejected
+    r = client.post("/quality_observation", json=body,
+                    headers={"Authorization": "Bearer node-tok"})
+    assert r.status_code == 403
+    # the probe token is accepted
+    r = client.post("/quality_observation", json=body,
+                    headers={"Authorization": "Bearer probe-tok"})
+    assert r.status_code == 200
+
+
+def test_quality_observation_falls_back_to_node_token(monkeypatch):
+    """Back-compat: no probe token configured → node token still works."""
+    monkeypatch.setenv("SLANCHA_NODE_TOKEN", "node-tok")
+    monkeypatch.delenv("SLANCHA_PROBE_TOKEN", raising=False)
+    from mesh.registry_app import create_mesh_app
+    from fastapi.testclient import TestClient
+
+    client = TestClient(create_mesh_app())
+    body = {"specialist_id": "qwen2.5-coder-7b-q4-ollama", "score": 5.0,
+            "sample_count": 10, "observation_source": "real_traffic"}
+    r = client.post("/quality_observation", json=body,
+                    headers={"Authorization": "Bearer node-tok"})
+    assert r.status_code == 200

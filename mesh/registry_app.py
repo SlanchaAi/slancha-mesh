@@ -45,6 +45,7 @@ from mesh.registry import (
 )
 
 NODE_TOKEN_ENV = "SLANCHA_NODE_TOKEN"
+PROBE_TOKEN_ENV = "SLANCHA_PROBE_TOKEN"
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,32 @@ def verify_node_token(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="invalid bearer token",
+        )
+
+
+def verify_probe_token(
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    """Auth for `/quality_observation` (#105). Quality scores steer routing +
+    silence drift, so writing them is privileged. If `SLANCHA_PROBE_TOKEN` is set,
+    require IT — so a compromised inference node holding only the shared
+    `SLANCHA_NODE_TOKEN` can't forge a rival's score. If no probe token is
+    configured, fall back to the node token (back-compat); if neither, dev-open."""
+    probe = os.environ.get(PROBE_TOKEN_ENV, "").strip() or None
+    expected = probe if probe is not None else _expected_token()
+    if expected is None:
+        return
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="missing or malformed Authorization header",
+            headers={"WWW-Authenticate": 'Bearer realm="slancha-mesh"'},
+        )
+    received = authorization[len("Bearer ") :].strip()
+    if not hmac.compare_digest(received, expected):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="invalid probe token",
         )
 
 
@@ -339,7 +366,7 @@ def create_mesh_app(registry: MeshRegistry | None = None) -> FastAPI:
     )
     def post_quality_observation(
         body: QualityObservationPostRequest,
-        _: Annotated[None, Depends(verify_node_token)],
+        _: Annotated[None, Depends(verify_probe_token)],
     ) -> QualityObservationResponse:
         """Write a probe-set-derived score into a specialist's card.
 
