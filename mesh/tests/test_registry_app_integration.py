@@ -86,20 +86,20 @@ def test_heterogeneous_fleet_visible_in_snapshot(
 # ---------------------------------------------------------------------------
 
 
-def test_stale_node_flips_unreachable_in_snapshot(app_client, spark_node, mac_mini_node, catalog, fresh_now):
-    """Per spec §3.4: nodes silent >5 min should show unreachable.
+def test_stale_node_flips_unreachable_in_snapshot(spark_node, mac_mini_node, catalog):
+    """Per spec §3.4: nodes silent >5 min show unreachable.
 
-    The /registry endpoint uses datetime.now(UTC) internally — we can't
-    monkey-patch that across the HTTP boundary, so we drive staleness by
-    posting a stale-ts heartbeat then a fresh one and asserting the stale
-    one is marked unreachable.
+    Post-#102 the server stamps the receive time (a node can't claim freshness
+    via its own `ts`), so staleness is driven by the SERVER clock: spark's
+    heartbeat is stamped 10 min ago, mac-mini's now.
     """
-    client, reg = app_client
-    # spark posts a heartbeat 10 minutes in the past
-    stale_ts = datetime.now(timezone.utc) - timedelta(minutes=10)
-    _post_hb(client, spark_node, stale_ts, catalog, ["qwen3-coder-30b-a3b-fp8"])
-    # mac-mini posts fresh
-    _post_hb(client, mac_mini_node, datetime.now(timezone.utc), catalog, ["qwen3-math-7b-q4"])
+    clock = {"t": datetime.now(timezone.utc) - timedelta(minutes=10)}
+    reg = MeshRegistry(catalog=catalog, clock=lambda: clock["t"])
+    client = TestClient(create_mesh_app(registry=reg))
+
+    _post_hb(client, spark_node, clock["t"], catalog, ["qwen3-coder-30b-a3b-fp8"])  # stamped 10m ago
+    clock["t"] = datetime.now(timezone.utc)                                          # advance server clock
+    _post_hb(client, mac_mini_node, clock["t"], catalog, ["qwen3-math-7b-q4"])       # stamped now
 
     snap = client.get("/registry").json()["snapshot"]
     assert snap["nodes"][spark_node.node_id]["health"] == "unreachable"

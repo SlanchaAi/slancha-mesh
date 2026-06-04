@@ -18,6 +18,7 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
 from typing import Literal
 from uuid import uuid4
 
@@ -190,9 +191,13 @@ class MeshRegistry:
         *,
         max_events: int = DEFAULT_MAX_EVENTS,
         store: EventStore | None = None,
+        clock: "Callable[[], datetime] | None" = None,
     ) -> None:
         self._events: list[Event] = []
         self._max_events = max_events
+        # Server clock for stamping heartbeat receive-time (#102). Injectable so
+        # tests control "now"; defaults to real UTC.
+        self._clock: "Callable[[], datetime]" = clock or (lambda: datetime.now(timezone.utc))
         # Durability seam (issue: on-prem persistence). Default = no durability
         # (in-memory only, pre-seam behavior). A durable store survives restarts.
         self._store: EventStore = store or NullEventStore()
@@ -228,7 +233,15 @@ class MeshRegistry:
             if req.node_url:
                 self._node_urls[req.heartbeat.node_id] = req.node_url
             self._record(
-                HeartbeatEvent(ts=req.heartbeat.ts, node_url=req.node_url, heartbeat=req.heartbeat)
+                # SERVER-STAMP the event time (#102): a node controls
+                # `heartbeat.ts`, and using it for the unreachable/age calc let a
+                # node send a future ts to look alive forever, or (via an
+                # impersonated heartbeat) a far-past ts to evict a live peer. The
+                # event ts is now the server's receive time; the node's reported
+                # ts is preserved in `heartbeat.heartbeat.ts` as telemetry.
+                HeartbeatEvent(
+                    ts=self._clock(), node_url=req.node_url, heartbeat=req.heartbeat
+                )
             )
             if len(self._events) > self._max_events:
                 self._compact_heartbeats()
@@ -379,7 +392,7 @@ class MeshRegistry:
             if node_id in left:
                 continue
             hb = ev.heartbeat
-            age = now - hb.ts
+            age = now - ev.ts  # server-stamped receive time, not the node's claimed ts (#102)
             health = hb.health
             if age > NODE_UNREACHABLE_AFTER:
                 health = "unreachable"
@@ -392,7 +405,7 @@ class MeshRegistry:
                 node_id=node_id,
                 friendly_name=hb.hardware.friendly_name,
                 health=health,
-                last_seen=hb.ts,
+                last_seen=ev.ts,
                 loaded_specialist_ids=[lm.specialist_id for lm in hb.loaded_models],
                 queue_depth=hb.util.queue_depth,
                 p95_latency_ms_60s=hb.util.p95_latency_ms_60s,
@@ -406,7 +419,7 @@ class MeshRegistry:
                     queue_depth=hb.util.queue_depth,
                     p95_latency_ms_60s=hb.util.p95_latency_ms_60s,
                     node_url=lm.node_url or node_url,
-                    last_seen=hb.ts,
+                    last_seen=ev.ts,
                 )
                 specialists.setdefault(lm.specialist_id, []).append(binding)
                 card = catalog_snapshot.get(lm.specialist_id)
