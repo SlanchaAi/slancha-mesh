@@ -616,3 +616,56 @@ def test_heartbeat_loop_runs_in_thread_and_stops():
     daemon.stop()
     # We should have sent at least 2 heartbeats in 200ms with 50ms interval.
     assert daemon.heartbeats_sent >= 2
+
+
+# --- #126: node sends a self-signed identity cert in its heartbeat ---
+
+class _CapturingRegistry:
+    """Captures the HeartbeatPostRequest a daemon posts (no real registry)."""
+    def __init__(self):
+        self.last = None
+    def record_heartbeat(self, req):
+        self.last = req
+        from mesh.registry import HeartbeatPostResponse
+        return HeartbeatPostResponse(ack=True, next_due_seconds=5)
+
+
+def test_daemon_sends_identity_cert_when_key_set(tmp_path, monkeypatch):
+    pytest.importorskip("nacl")
+    from mesh.identity import generate_node_keypair, verify_node_cert
+
+    sk, _pk = generate_node_keypair()
+    reg = _CapturingRegistry()
+    be = NullBackend(card=_card())
+    daemon = ServeDaemon(backends=[be], probe=_probe(), registry=reg, node_key_b64=sk)
+    daemon.start(wait_ready=True, ready_timeout=1.0)
+    daemon.post_heartbeat()
+    daemon.stop()
+    assert reg.last is not None and reg.last.identity_cert is not None
+    cert = reg.last.identity_cert.model_dump()
+    assert verify_node_cert(cert, "test-node")  # valid self-signed binding for this node
+
+
+def test_daemon_omits_cert_when_no_key():
+    reg = _CapturingRegistry()
+    be = NullBackend(card=_card())
+    daemon = ServeDaemon(backends=[be], probe=_probe(), registry=reg)  # no node_key_b64
+    daemon.start(wait_ready=True, ready_timeout=1.0)
+    daemon.post_heartbeat()
+    daemon.stop()
+    assert reg.last is not None and reg.last.identity_cert is None  # back-compat: no cert
+
+
+def test_resolve_node_key_env_and_file(tmp_path, monkeypatch):
+    from mesh.serve import resolve_node_key
+
+    monkeypatch.delenv("SLANCHA_NODE_KEY_B64", raising=False)
+    monkeypatch.delenv("SLANCHA_NODE_KEY_FILE", raising=False)
+    assert resolve_node_key() is None
+    monkeypatch.setenv("SLANCHA_NODE_KEY_B64", "literal-key")
+    assert resolve_node_key() == "literal-key"
+    monkeypatch.delenv("SLANCHA_NODE_KEY_B64")
+    f = tmp_path / "node.key"
+    f.write_text("file-key\n")
+    monkeypatch.setenv("SLANCHA_NODE_KEY_FILE", str(f))
+    assert resolve_node_key() == "file-key"  # trimmed

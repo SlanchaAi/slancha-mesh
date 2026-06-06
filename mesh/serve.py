@@ -99,6 +99,11 @@ class ServeDaemon:
     # Per-pass kwargs (n_examples, n_steps_planned, per_step_sleep_s, seed).
     # Defaults are TrainingPass defaults (20 stub steps × 1ms).
     training_kwargs: dict | None = None
+    # Ed25519 node-identity secret (base64) — #102/#126. When set, every heartbeat
+    # carries a self-signed identity_cert binding node_id↔public_key, which the
+    # registry pins (TOFU) and, once SLANCHA_REQUIRE_NODE_IDENTITY is on, enforces.
+    # None (default) → no cert, back-compat (registry still accepts unless requiring).
+    node_key_b64: str | None = None
 
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
@@ -255,7 +260,13 @@ class ServeDaemon:
             if first_backend
             else None
         )
-        req = HeartbeatPostRequest(heartbeat=hb, node_url=node_url)
+        # Attach the self-signed identity cert when a node key is configured (#126).
+        identity_cert = None
+        if self.node_key_b64:
+            from mesh.identity import build_node_cert
+
+            identity_cert = build_node_cert(hb.node_id, self.node_key_b64)
+        req = HeartbeatPostRequest(heartbeat=hb, node_url=node_url, identity_cert=identity_cert)
         if self.registry is not None:
             self.registry.record_heartbeat(req)
         else:
@@ -515,7 +526,26 @@ def build_daemon(
         registry=registry,
         advertise_host=advertise_host,
         log_path=log_dir / "serve.log" if log_dir else None,
+        node_key_b64=resolve_node_key(),
     )
+
+
+def resolve_node_key() -> str | None:
+    """The node-identity secret (base64) for #102/#126 heartbeat certs, or None.
+
+    Precedence: SLANCHA_NODE_KEY_B64 (literal) > SLANCHA_NODE_KEY_FILE (0600 file,
+    e.g. /etc/slancha/node.key, the recommended store). None → no cert (back-compat).
+    """
+    b64 = os.environ.get("SLANCHA_NODE_KEY_B64")
+    if b64:
+        return b64.strip()
+    path = os.environ.get("SLANCHA_NODE_KEY_FILE")
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------

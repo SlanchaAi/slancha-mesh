@@ -35,7 +35,10 @@ jobs:
           enable-cache: true
 
       - name: Install (locked — reproducible from uv.lock)
-        run: uv sync --extra dev --frozen --python ${{ matrix.python-version }}
+        # --extra signing pulls PyNaCl so the node-identity (#102), eval-row/seed
+        # signature (#104), and peer-challenge (#108) tests RUN in CI. Without it
+        # they importorskip and 15 security tests silently pass-by-skipping (#125).
+        run: uv sync --extra dev --extra signing --frozen --python ${{ matrix.python-version }}
 
       - name: Lint (ruff)
         run: uv run --python ${{ matrix.python-version }} ruff check mesh/
