@@ -6,7 +6,10 @@
 ## Run:   docker run --rm -p 8088:8088 slancha-registry
 ##        (set -e SLANCHA_NODE_TOKEN=... to require Bearer auth on all but /health)
 
-FROM python:3.12-slim AS build
+# Base image digest-pinned (#129) so a silently-republished `python:3.12-slim` tag
+# can't change the build. Bump deliberately: docker pull python:3.12-slim &&
+# docker inspect --format='{{index .RepoDigests 0}}' python:3.12-slim
+FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS build
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -27,7 +30,7 @@ RUN python -m hatchling build && ls -la dist/
 
 # ---
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS runtime
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \

@@ -26,6 +26,12 @@ on:
       # gate-parity job below fails when a change here drifts from the mirror.
       - "mesh/eval/gate.py"
       - "mesh/eval/runner.py"
+      # Signing/identity sources are ALSO a cross-repo contract (slancha-local +
+      # kanpai mirror their shapes). Without these a signing-only PR skipped the
+      # parity workflow entirely (#128).
+      - "mesh/eval/row_sign.py"
+      - "mesh/eval/seed_verify.py"
+      - "mesh/identity.py"
       - ".github/workflows/cross-repo-schema-pin.yml"
   push:
     branches: [main]

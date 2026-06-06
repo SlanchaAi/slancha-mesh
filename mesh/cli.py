@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -656,6 +657,39 @@ SIBLING_TOOLS = (
 )
 
 
+def cmd_node(args: argparse.Namespace) -> int:
+    """`slancha-mesh node keygen` — mint an Ed25519 node-identity keypair (#102/#126).
+
+    Writes the SECRET to a 0600 file (default /etc/slancha/node.key, override with
+    --out); prints the public key + did:wire id. Point the daemon at it with
+    SLANCHA_NODE_KEY_FILE=<path> so every heartbeat carries a signed identity cert."""
+    if args.node_action != "keygen":
+        _print("usage: slancha-mesh node keygen [--out PATH]")
+        return 1
+    try:
+        from mesh.identity import did_for, generate_node_keypair
+    except Exception as e:  # noqa: BLE001
+        _print(f"[node] node identity needs the 'signing' extra: {e}")
+        return 1
+    sk_b64, pk_b64 = generate_node_keypair()
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        _print(f"[node] {out} exists — refusing to overwrite (use --force). No key written.")
+        return 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(sk_b64 + "\n", encoding="utf-8")
+    try:
+        os.chmod(out, 0o600)
+    except OSError:
+        _print(f"[node] WARNING: could not chmod 0600 {out} — secure it manually.")
+    node_id = args.node_id or os.environ.get("SLANCHA_NODE_ID") or socket.gethostname()
+    _print(f"[node] secret written 0600 -> {out}")
+    _print(f"[node] public_key_b64: {pk_b64}")
+    _print(f"[node] did: {did_for(node_id, pk_b64)}")
+    _print(f"[node] enable: export SLANCHA_NODE_KEY_FILE={out}  (then `slancha-mesh up`)")
+    return 0
+
+
 def _sibling_tools_epilog() -> str:
     lines = ["related operator commands (installed as their own scripts):"]
     width = max(len(name) for name, _ in SIBLING_TOOLS)
@@ -737,6 +771,16 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--node-info-port", type=int, default=DEFAULT_NODE_INFO_PORT)
     dr.add_argument("--json", action="store_true", help="Emit the report as JSON.")
     dr.set_defaults(func=cmd_doctor)
+
+    # node (identity keygen — #102/#126)
+    nd = sub.add_parser("node", help="Node identity: mint the Ed25519 key heartbeats sign with.")
+    nd_sub = nd.add_subparsers(dest="node_action", required=True)
+    nd_kg = nd_sub.add_parser("keygen", help="Mint a node-identity keypair; write the 0600 secret.")
+    nd_kg.add_argument("--out", default=os.environ.get("SLANCHA_NODE_KEY_FILE", "/etc/slancha/node.key"),
+                       help="Where to write the secret (0600). Default /etc/slancha/node.key.")
+    nd_kg.add_argument("--node-id", default=None, help="node_id for the printed did (default: hostname).")
+    nd_kg.add_argument("--force", action="store_true", help="Overwrite an existing key file.")
+    nd.set_defaults(func=cmd_node)
 
     # serve (alias to daemon-only mesh.serve for dev / non-tailnet)
     sv = sub.add_parser("serve", help="Daemon-only serve (dev/non-tailnet); passthrough to `python -m mesh.serve`.")
