@@ -216,20 +216,29 @@ def build_spec(
     base_model_id: str,
     gate_defaults: GateBindingDefaults = GateBindingDefaults(),
     priority: int = 5,
+    holdout_ref: str | None = None,
+    curation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one GATE-CONTRACT experiment-spec line for a qualifying cluster.
 
     The spec id embeds the centroid content-hash, so an unchanged cluster emits
     an identical id and :func:`mesh.loop_runner.enqueue` dedups it — generation
-    is idempotent. The cluster centroid is both `centroid_ref` and the
-    `holdout_ref` and is folded into `judge_model` (binding #7: the centroid IS
-    the frozen judge — keying judge-match on the frozen bytes).
+    is idempotent. The cluster centroid is the `centroid_ref`; without curation
+    it doubles as the `holdout_ref` and is folded into `judge_model` (binding
+    #7: the centroid IS the frozen judge — keying judge-match on the frozen
+    bytes). When the curation stage ran (``mesh.curation``), `holdout_ref` is
+    the curated hard-holdout's content-hash instead — the judge is then keyed
+    on the *frozen exam bytes* (GATE-CONTRACT: "<grader-id>@<holdout
+    content-hash short>") and the curation manifest rides along for audit.
     """
     cref = centroid_ref(centroid)
-    short = _short(cref)
+    href = holdout_ref or cref
+    short = _short(href)  # keys the judge on the frozen exam bytes
     task = f"cluster:{route}:{cluster_id}"
     return {
-        "id": f"ft_{route}-c{cluster_id}@{short}",
+        # id stays keyed on CLUSTER identity (centroid), not the holdout —
+        # an unchanged cluster dedups in the queue regardless of curation.
+        "id": f"ft_{route}-c{cluster_id}@{_short(cref)}",
         "type": "train",
         "priority": priority,
         "source": "traffic_cluster",
@@ -239,6 +248,7 @@ def build_spec(
             "n_traces": n_traces,
             "drift": round(drift, 4),
             "exemplar_trace_ids": list(exemplar_trace_ids),
+            **({"curation": curation} if curation is not None else {}),
         },
         "cmd": (
             f"slancha-mesh train --task {task} --base {base_model_id} "
@@ -254,7 +264,7 @@ def build_spec(
             "judge_model": f"{gate_defaults.judge_grader}@{short}",
             "min_champion_lifetime_s": gate_defaults.min_champion_lifetime_s,
             "decisive_gain": gate_defaults.decisive_gain,
-            "holdout_ref": cref,
+            "holdout_ref": href,
         },
         "env": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
         "status": "pending",
@@ -313,6 +323,18 @@ def _default_cluster_fn(
 # ───────────────────────────────── orchestration ─────────────────────────────
 
 
+class CurateFn(Protocol):
+    """The curation seam: ``(cluster_traces, centroid) -> CurationResult``
+    (see ``mesh.curation``). When bound, each ignited cluster is curated —
+    difficulty-ranked hard holdout + synthetic gap-fill — and the spec's
+    ``gate.holdout_ref`` pins the curated exam's content-hash instead of the
+    raw centroid. Optional: without it, specs emit exactly as before."""
+
+    def __call__(
+        self, traces: list[dict[str, Any]], centroid: Sequence[float]
+    ) -> Any: ...
+
+
 class ChampionPredicate(Protocol):
     """`(cluster_key) -> True if a HEALTHY champion already serves it`. The
     default binding reads a champion registry; injected in tests. 'Healthy'
@@ -350,6 +372,7 @@ def generate(
     snapshot_path: Path | None = None,
     gate_defaults: GateBindingDefaults = GateBindingDefaults(),
     n_exemplars: int = 8,
+    curate_fn: CurateFn | None = None,
 ) -> GenerationResult:
     """One ignition pass: cluster a graded-traffic window, ignition-gate each
     cluster, and enqueue a GATE-CONTRACT spec for every cluster that qualifies.
@@ -387,6 +410,13 @@ def generate(
         exemplars = [
             traces[i].get("id", i) for i in c.trace_indices[:n_exemplars]
         ]
+        holdout_ref: str | None = None
+        curation_manifest: dict[str, Any] | None = None
+        if curate_fn is not None:
+            cluster_traces = [traces[i] for i in c.trace_indices]
+            curated = curate_fn(cluster_traces, c.centroid)
+            holdout_ref = curated.holdout_ref
+            curation_manifest = curated.manifest
         spec = build_spec(
             route=c.route,
             cluster_id=c.cluster_id,
@@ -396,6 +426,8 @@ def generate(
             centroid=c.centroid,
             base_model_id=base_model_id,
             gate_defaults=gate_defaults,
+            holdout_ref=holdout_ref,
+            curation=curation_manifest,
         )
         if enqueue(queue_path, spec):
             result.specs.append(spec)
@@ -410,6 +442,7 @@ __all__ = [
     "MIN_TRACES",
     "ChampionPredicate",
     "ClusterFn",
+    "CurateFn",
     "GateBindingDefaults",
     "GenerationResult",
     "IgnitionDecision",
