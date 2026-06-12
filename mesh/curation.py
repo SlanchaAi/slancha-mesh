@@ -157,11 +157,17 @@ def default_difficulty_scorer(
         emb = trace_embedding(trace)
         if emb is not None and centroid is not None and len(centroid) > 0:
             dist = 1.0 - _cosine(emb, [float(x) for x in centroid])
-            dist = min(max(dist, 0.0), 1.0)
+            # a NaN/inf embedding (corrupt row) must not poison the ranking
+            # (stress finding B4): non-finite → neutral, same as missing
+            dist = min(max(dist, 0.0), 1.0) if math.isfinite(dist) else 0.5
         else:
             dist = 0.5
         js = trace.get("judge_score")
-        if isinstance(js, (int, float)) and max_judge_score > 0:
+        if (
+            isinstance(js, (int, float))
+            and math.isfinite(js)
+            and max_judge_score > 0
+        ):
             shortfall = 1.0 - min(max(float(js) / max_judge_score, 0.0), 1.0)
         else:
             shortfall = 0.5
@@ -173,11 +179,22 @@ def default_difficulty_scorer(
 @dataclass(frozen=True)
 class ScoredTrace:
     """One trace's difficulty rank entry — index into the caller's trace list,
-    the score, and the deterministic tie-break key."""
+    the score, and the deterministic tie-break keys."""
 
     index: int
     score: float
     fingerprint: str
+    row_key: str  # full-row content hash — the FINAL tie-break
+
+
+def _row_key(trace: dict[str, Any]) -> str:
+    """Content hash of the WHOLE row. Two traces can share a prompt
+    fingerprint (duplicate prompts) yet differ in content (embedding, grade);
+    without a full-row tie-break, equal-score sorting falls back to input
+    order and the holdout_ref becomes order-dependent (stress finding B1)."""
+    return hashlib.sha256(
+        json.dumps(trace, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def rank_by_difficulty(
@@ -186,14 +203,27 @@ def rank_by_difficulty(
     scorer: DifficultyScorer | None = None,
 ) -> list[ScoredTrace]:
     """Score every trace and sort hardest-first. Ties break on the prompt
-    fingerprint so the ranking (and therefore the holdout) is deterministic
-    across runs regardless of input order."""
+    fingerprint, then on the full-row content hash, so the ranking (and
+    therefore the holdout) is deterministic across runs regardless of input
+    order — even when duplicate prompts carry different signals."""
     s = scorer or default_difficulty_scorer()
-    ranked = [
-        ScoredTrace(index=i, score=float(s(t, centroid)), fingerprint=_prompt_fingerprint(t))
-        for i, t in enumerate(traces)
-    ]
-    ranked.sort(key=lambda r: (-r.score, r.fingerprint))
+    ranked = []
+    for i, t in enumerate(traces):
+        score = float(s(t, centroid))
+        if not math.isfinite(score):
+            # an injected scorer returning NaN/inf would make the sort —
+            # and therefore the holdout_ref — input-order-dependent (B4).
+            # Neutral, never poisonous.
+            score = 0.5
+        ranked.append(
+            ScoredTrace(
+                index=i,
+                score=score,
+                fingerprint=_prompt_fingerprint(t),
+                row_key=_row_key(t),
+            )
+        )
+    ranked.sort(key=lambda r: (-r.score, r.fingerprint, r.row_key))
     return ranked
 
 
@@ -232,6 +262,12 @@ def split_hard_holdout(
     meaningful exam and a train pool — curating a tiny cluster would produce
     a noise gate, better to refuse loudly.
     """
+    if max_holdout < min_holdout:
+        raise ValueError(
+            f"contradictory holdout bounds: max_holdout {max_holdout} < "
+            f"min_holdout {min_holdout} — refusing to curate (stress finding B2: "
+            "silently clamping below the minimum would ship a noise exam)"
+        )
     n_real = sum(1 for t in traces if not is_synthetic(t))
     target = min(max(int(round(holdout_frac * n_real)), min_holdout), max_holdout)
     if n_real < min_holdout + min_train:
@@ -392,7 +428,13 @@ def fill_gaps(
     counts = sorted(len(b.indices) for b in bands)
     median = counts[len(counts) // 2] if counts else 0
     synthetic: list[dict[str, Any]] = []
-    stats = {"requested": 0, "produced": 0, "dropped_holdout_dup": 0, "dropped_train_dup": 0}
+    stats = {
+        "requested": 0,
+        "produced": 0,
+        "dropped_holdout_dup": 0,
+        "dropped_train_dup": 0,
+        "failed_batches": 0,
+    }
     seen_train_fps = {
         _prompt_fingerprint(traces[i]) for b in bands for i in b.indices
     }
@@ -417,8 +459,18 @@ def fill_gaps(
             continue  # no real rows anywhere — nothing to seed from
         exemplars = [traces[i] for i in exemplar_idx[:max_exemplars]]
         stats["requested"] += want
-        rows = generator(exemplars, want)[:want]
+        try:
+            rows = generator(exemplars, want)[:want]
+        except Exception:  # noqa: BLE001 - the seam is deployment code; gap-fill
+            # is best-effort BY CONTRACT (the exam and the guards never depend
+            # on it) — a raising generator must not kill the curation pass
+            # (stress finding B3). The shortfall is counted, never silent.
+            stats["failed_batches"] += 1
+            continue
         for row in rows:
+            if not isinstance(row, dict):
+                stats["dropped_invalid"] = stats.get("dropped_invalid", 0) + 1
+                continue
             fp = _prompt_fingerprint(row)
             if fp in holdout_fingerprints:
                 stats["dropped_holdout_dup"] += 1

@@ -25,6 +25,9 @@ from mesh.curation import (
     trace_embedding,
     write_curation,
 )
+
+# (split_hard_holdout / rank_by_difficulty also exercised by the B1–B4
+# stress-campaign regressions below)
 from mesh.generator import _Cluster, build_spec, centroid_ref, generate
 from mesh.loop_runner import read_queue
 
@@ -263,6 +266,74 @@ def test_write_curation_roundtrip(tmp_path):
     assert len(train) == manifest["n_train_real"] + manifest["n_train_synthetic"]
     assert json.loads((tmp_path / "c0" / "manifest.json").read_text())[
         "holdout_ref"] == res.holdout_ref
+
+
+# ───────────────────── stress-campaign regressions (B1–B4) ──────────────────
+
+
+def test_duplicate_prompt_different_content_is_order_independent():
+    """B1: two rows sharing a prompt fingerprint but differing in content
+    (embedding/grade) tie on score — without a full-row tie-break the
+    holdout_ref depended on input order."""
+    traces = _cluster_traces(100)
+    # clone t0's prompt onto a row with different signals, equal score by
+    # construction is not needed — the bug fires on fingerprint ties anywhere
+    traces[60]["prompt"] = traces[61]["prompt"]
+    r1 = curate_cluster(traces, CENTROID)
+    r2 = curate_cluster(list(reversed(traces)), CENTROID)
+    assert r1.holdout_ref == r2.holdout_ref
+
+
+def test_contradictory_holdout_bounds_refused():
+    """B2: max_holdout < min_holdout must refuse loudly, not silently clamp
+    below the documented minimum."""
+    traces = _cluster_traces(100)
+    ranked = rank_by_difficulty(traces, CENTROID)
+    with pytest.raises(ValueError, match="contradictory"):
+        split_hard_holdout(traces, ranked, min_holdout=20, max_holdout=10)
+
+
+def test_raising_generator_does_not_kill_curation():
+    """B3: gap-fill is best-effort by contract — a raising SyntheticGenerator
+    is counted, never fatal."""
+    traces = _cluster_traces(100)
+    for i in range(80, 95):
+        traces[i]["embedding"] = [0.7, 0.7]
+
+    def boom(exemplars: list[dict], n: int) -> list[dict]:
+        raise RuntimeError("sdg endpoint down")
+
+    res = curate_cluster(traces, CENTROID, synthetic_generator=boom)
+    assert res.synthetic == []
+    assert res.manifest["sdg"]["failed_batches"] >= 1
+
+
+def test_nan_inf_signals_do_not_poison_ranking():
+    """B4: NaN/inf embeddings or judge scores → neutral score, finite sort,
+    order-independent ref."""
+    traces = _cluster_traces(100)
+    traces[3]["embedding"] = [float("nan"), 1.0]
+    traces[4]["embedding"] = [float("inf"), 0.0]
+    traces[5]["judge_score"] = float("nan")
+    s = default_difficulty_scorer()
+    import math
+    for t in traces[:10]:
+        assert math.isfinite(s(t, CENTROID))
+    r1 = curate_cluster(traces, CENTROID)
+    r2 = curate_cluster(list(reversed(traces)), CENTROID)
+    assert r1.holdout_ref == r2.holdout_ref
+
+
+def test_nan_returning_injected_scorer_sanitized():
+    """B4b: even an injected scorer returning NaN must not make the sort
+    order-dependent."""
+    def evil(trace, centroid):
+        return float("nan") if trace["id"] == "t7" else 0.3
+
+    traces = _cluster_traces(100)
+    ranked = rank_by_difficulty(traces, CENTROID, evil)
+    import math
+    assert all(math.isfinite(r.score) for r in ranked)
 
 
 # ─────────────────────── generator integration (seam) ────────────────────────
