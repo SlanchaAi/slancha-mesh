@@ -31,7 +31,7 @@ def test_each_card_is_specialist_card():
         assert c.runtime_gb >= c.storage_gb  # weights fit in runtime budget
         assert c.min_vram_gb >= 1.0
         assert c.context_window >= 2048
-        assert c.required_backend in ("vllm", "llamacpp", "ollama", "mlx", "hf_transformers")
+        assert c.required_backend in ("vllm", "llamacpp", "ollama", "mlx", "hf_transformers", "external")
         assert "gb10" in c.estimated_tps_at  # we benchmark on Spark first
         assert c.coverage_tier in (1, 2, 3)
 

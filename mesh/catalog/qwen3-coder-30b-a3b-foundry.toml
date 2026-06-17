@@ -1,0 +1,30 @@
+# Tier-1 specialist: code / programming — served by an ALREADY-RUNNING endpoint.
+# Same weights as `qwen3-coder-30b-a3b-fp8` (30B MoE, 3B active, native FP8 on
+# Blackwell sm_121), but `required_backend = "external"`: the mesh routes to a
+# standing 24/7 vLLM (systemd `foundry-backbone.service` on box-1, :8011) instead
+# of spawning + lifecycle-managing its own process. This is the "foundry backbone"
+# — the company's always-on local bulk endpoint — registered so the mesh router
+# can select it without owning its lifecycle (no start/stop). See the sibling
+# vllm card for the mesh-managed variant.
+model_id = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
+specialist_id = "qwen3-coder-30b-a3b-foundry"
+domain = "code"
+difficulty_tiers = ["easy", "medium", "hard"]
+languages = ["en"]
+required_backend = "external"
+static_base_url = "http://127.0.0.1:8011"
+requires_fp4 = false
+storage_gb = 30.0
+runtime_gb = 70.0
+min_vram_gb = 30.0
+context_window = 32768
+n_layers = 48
+hidden_size = 2048
+supports_lora_finetune = false
+upstream_model_card = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
+coverage_tier = 1
+
+[estimated_tps_at]
+gb10 = 30.0
+m3_ultra = 45.0
+l40 = 70.0

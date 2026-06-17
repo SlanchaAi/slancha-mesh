@@ -31,6 +31,7 @@ from pathlib import Path
 from mesh.backends import (
     DEFAULT_OLLAMA_PORT,
     BaseBackend,
+    ExternalBackend,
     LlamaCppBackend,
     MLXBackend,
     NullBackend,
@@ -463,6 +464,20 @@ def build_backend(
             port=port,
             log_path=log_path,
         )
+    if card.required_backend == "external":
+        # Already-running, externally-managed endpoint (e.g. a 24/7 systemd
+        # vLLM). The mesh routes to it but never spawns or kills it. Needs
+        # `static_base_url`; missing → NullBackend with a hint (mirrors the
+        # ollama_tag / gguf_path / mlx_repo fallbacks above).
+        if card.static_base_url is None:
+            _logger.warning(
+                "specialist %r requires the external backend but has no "
+                "`static_base_url`; falling back to NullBackend. Set "
+                "`static_base_url` on the card.",
+                card.specialist_id,
+            )
+            return NullBackend(card=card)
+        return ExternalBackend(card=card, base_url=card.static_base_url)
     raise ValueError(f"unknown backend {card.required_backend!r}")
 
 

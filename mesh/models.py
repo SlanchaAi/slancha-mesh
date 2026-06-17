@@ -24,7 +24,7 @@ DomainId = str
 ModelId = str
 
 DifficultyTier = Literal["easy", "medium", "hard"]
-Backend = Literal["vllm", "llamacpp", "ollama", "mlx", "hf_transformers"]
+Backend = Literal["vllm", "llamacpp", "ollama", "mlx", "hf_transformers", "external"]
 HealthState = Literal["healthy", "degraded", "draining", "training", "unreachable"]
 Arch = Literal["aarch64", "x86_64", "apple-silicon"]
 
@@ -129,6 +129,11 @@ class SpecialistCard(_Frozen):
     ollama_tag: str | None = None
     gguf_path: str | None = None
     mlx_repo: str | None = None
+    # External/static endpoint: an already-running OpenAI-compatible server the
+    # mesh should USE rather than spawn (e.g. a 24/7 systemd vLLM). Set together
+    # with `required_backend = "external"`; the mesh routes to this URL and never
+    # manages the process lifecycle (no start/stop). Form: "http://host:port".
+    static_base_url: str | None = None
 
     # Slancha-internal: coverage tier used by the tiered allocator.
     # Tier 1 = essentials (math/code/general); Tier 2 = important

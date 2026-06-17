@@ -973,6 +973,69 @@ class MLXBackend:
 
 
 # ---------------------------------------------------------------------------
+# External / static endpoint (mesh USES it, does not own its lifecycle)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ExternalBackend:
+    """An already-running, externally-managed OpenAI-compatible endpoint.
+
+    Unlike every other backend, this one owns NO subprocess: the server (e.g. a
+    24/7 systemd vLLM, or a model on another host) is managed outside the mesh.
+    `start()`/`stop()` are deliberate no-ops — the mesh must never spawn or kill
+    it. The router only needs `base_url` + a liveness probe, which is all this
+    provides. Wired from a card with `required_backend = "external"` +
+    `static_base_url`.
+    """
+
+    card: SpecialistCard
+    base_url: str = "http://127.0.0.1:8011"
+    name: str = "external"
+
+    @property
+    def health_url(self) -> str:
+        return f"{self.base_url}/health"
+
+    def start(self) -> None:
+        # No-op: the endpoint is externally managed (systemd / another host).
+        return None
+
+    def is_alive(self) -> bool:
+        # vLLM exposes /health at the root; /v1/models is the OpenAI-spec
+        # fallback for servers that don't. Either 200 = alive. Never raises.
+        for path in ("/health", "/v1/models"):
+            try:
+                r = httpx.get(f"{self.base_url}{path}", timeout=3.0)
+                if r.status_code == 200:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def wait_ready(self, timeout: float = 600.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.is_alive():
+                return True
+            time.sleep(2.0)
+        return False
+
+    def stop(self, timeout: float = 30.0) -> None:
+        # No-op: NEVER terminate an externally-managed service.
+        return None
+
+    def utilization(self) -> dict:
+        try:
+            r = httpx.get(f"{self.base_url}/metrics", timeout=2.0)
+            if r.status_code == 200:
+                return {"running": 1}
+        except Exception:
+            pass
+        return {"queue_depth": 0, "running": 0}
+
+
+# ---------------------------------------------------------------------------
 # Null backend (tests + registry-only nodes)
 # ---------------------------------------------------------------------------
 
@@ -1005,6 +1068,7 @@ class NullBackend:
 __all__ = [
     "BaseBackend",
     "DEFAULT_OLLAMA_PORT",
+    "ExternalBackend",
     "LlamaCppBackend",
     "MLXBackend",
     "NullBackend",

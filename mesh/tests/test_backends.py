@@ -8,6 +8,7 @@ real-serving integration is in `test_integration_vllm.py` behind a
 from __future__ import annotations
 
 from mesh.backends import (
+    ExternalBackend,
     NullBackend,
     VLLMBackend,
     _needs_fp8_marlin_fallback,
@@ -129,3 +130,47 @@ def test_null_backend_lifecycle():
     assert be.wait_ready(timeout=0.01)
     be.stop()
     assert not be.is_alive()
+
+
+def _external_card() -> SpecialistCard:
+    """Card pointing at an already-running endpoint (mesh USES, doesn't own)."""
+    return SpecialistCard(
+        model_id="test/model",
+        specialist_id="test-external",
+        domain="code",
+        difficulty_tiers=["easy"],
+        required_backend="external",
+        static_base_url="http://127.0.0.1:1",  # dead port: probes must fail gracefully
+        storage_gb=1.0,
+        runtime_gb=2.0,
+        min_vram_gb=4.0,
+        context_window=2048,
+        n_layers=2,
+        estimated_tps_at={"gb10": 10.0},
+    )
+
+
+def test_external_backend_never_owns_lifecycle():
+    """start()/stop() are no-ops — the mesh must never spawn or kill an
+    externally-managed endpoint. Probes must never raise, even on a dead port."""
+    be = ExternalBackend(card=_external_card(), base_url="http://127.0.0.1:1")
+    assert be.name == "external"
+    assert be.base_url == "http://127.0.0.1:1"
+    assert be.start() is None  # no-op
+    assert be.stop() is None  # no-op — never kill an external service
+    assert be.is_alive() is False  # dead port, graceful (no raise)
+    assert be.wait_ready(timeout=0.01) is False
+    assert isinstance(be.utilization(), dict)
+
+
+def test_build_backend_external_wiring():
+    """Factory returns ExternalBackend for `required_backend="external"` with a
+    URL, and falls back to NullBackend (not a crash) when the URL is missing."""
+    from mesh.serve import build_backend
+
+    be = build_backend(_external_card(), port=0)
+    assert isinstance(be, ExternalBackend)
+    assert be.base_url == "http://127.0.0.1:1"
+
+    no_url = _external_card().model_copy(update={"static_base_url": None})
+    assert isinstance(build_backend(no_url, port=0), NullBackend)
