@@ -363,6 +363,29 @@ def test_estimated_tps_lower_with_kv_geometry():
     assert _estimated_tps(withkv, node) < _estimated_tps(plain, node)
 
 
+def test_decode_bytes_uses_active_params_for_moe():
+    # MoE: weight term is active_params_gb (3.3), NOT the 70GB runtime reservation.
+    moe = _kv_card(runtime_gb=70.0, active_params_gb=3.3, n_kv_heads=4, head_dim=128, kv_arch="gqa")
+    b = _decode_bytes_gb(moe, 8192)
+    assert 3.3 < b < 10.0  # active slice + small KV, nowhere near 70
+
+
+def test_decode_bytes_dense_ignores_absent_active_params():
+    dense = _kv_card(runtime_gb=8.0)  # active_params_gb None → weight term = runtime
+    assert _decode_bytes_gb(dense, 8192) == pytest.approx(8.0)
+
+
+def test_estimated_tps_moe_active_far_faster_than_total_weights():
+    # The mis-rank fix: scoring an A3B MoE by ACTIVE params makes it far faster
+    # than scoring it by total resident weights (the pre-fix behaviour).
+    node = _bw_node(273.0)  # GB10
+    moe_total = _kv_card(runtime_gb=70.0, n_kv_heads=4, head_dim=128, kv_arch="gqa")
+    moe_active = _kv_card(
+        runtime_gb=70.0, active_params_gb=3.3, n_kv_heads=4, head_dim=128, kv_arch="gqa"
+    )
+    assert _estimated_tps(moe_active, node) > 5 * _estimated_tps(moe_total, node)
+
+
 def test_representative_ctx_in_plausible_range():
     # The offline allocator scores against a typical agent context, not a
     # degenerate 1-token or an unrealistically huge window.

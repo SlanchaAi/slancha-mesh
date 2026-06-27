@@ -199,6 +199,14 @@ def _check_kv_geometry(card: SpecialistCard, path: Path, report: _Report) -> Non
             f"allocator decode estimate falls back to weights-only (loses the "
             f"long-context KV term)",
         )
+    if card.active_params_gb is not None and card.active_params_gb >= card.runtime_gb:
+        report.warning(
+            path,
+            "ACTIVE_PARAMS_NOT_LESS_THAN_TOTAL",
+            f"active_params_gb ({card.active_params_gb}) >= runtime_gb "
+            f"({card.runtime_gb}); the active decode slice should be SMALLER "
+            f"than the total resident footprint (MoE), else drop the field",
+        )
 
 
 def _check_one(path: Path) -> tuple[SpecialistCard | None, _Report]:

@@ -116,6 +116,15 @@ def test_kv_arch_with_full_geometry_clean(tmp_path):
     assert not any(x.code == "KV_GEOMETRY_INCOMPLETE" for x in report.findings)
 
 
+def test_active_params_ge_runtime_warns(tmp_path):
+    # active_params_gb must be SMALLER than total runtime_gb (12.0 in _GOOD_TOML).
+    bad = _GOOD_TOML.format(stem="moe") + "active_params_gb = 20.0\n"
+    f = _write(tmp_path / "moe.toml", bad)
+    report = validate_paths([f])
+    assert any(x.code == "ACTIVE_PARAMS_NOT_LESS_THAN_TOTAL" for x in report.findings)
+    assert not report.has_errors  # warning, not error
+
+
 def test_pydantic_validation_error_surfaces(tmp_path):
     """Missing required field → Pydantic validation error → reported."""
     bad = _GOOD_TOML.format(stem="missing").replace(
