@@ -70,6 +70,11 @@ class NodeProbe(_Frozen):
     vram_available_gb: float | None = None
     unified_memory: bool = False
     memory_bandwidth_gbs: float | None = None  # spec says required, but GB10 hides it
+    # Provenance of memory_bandwidth_gbs (allocator §4): "measured" = a live
+    # micro-bench ran on this node; "guessed" = the datasheet/_MEMORY_BANDWIDTH_GBS
+    # table; None = unknown. Emitted in the heartbeat for observability; a routing
+    # discount for "guessed" nodes is a follow-up (Step 5 gate), not yet wired.
+    bw_source: Literal["measured", "guessed"] | None = None
 
     # Network
     public_ipv4: str | None = None

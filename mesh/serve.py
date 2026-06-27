@@ -498,7 +498,10 @@ def build_daemon(
         raise KeyError(f"unknown specialist_id(s): {missing}")
 
     if probe is None:
-        probe = probe_node()
+        # Bring-up: the GPU is still free here (models load below), so measure
+        # real memory bandwidth once for the registry instead of the datasheet
+        # table. The bench self-skips if memory is tight or the box isn't CUDA.
+        probe = probe_node(measure_bandwidth=True)
 
     bind_host = "127.0.0.1"
     advertise_host: str | None = None

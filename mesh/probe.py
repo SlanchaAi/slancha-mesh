@@ -49,13 +49,38 @@ _FP16_TOPS_BY_CHIP: dict[str, float] = {
 # Memory bandwidth (GB/s). GB10 specifically does NOT expose this via
 # nvidia-smi; we record the spec'd value here.
 _MEMORY_BANDWIDTH_GBS: dict[str, float] = {
-    "NVIDIA GB10": 273.0,  # LPDDR5X-9600, 256-bit bus, per NVIDIA datasheet
+    "NVIDIA GB10": 273.0,  # LPDDR5X-8533, 256-bit bus (273 = 8533MT/s × 32B); per NVIDIA datasheet
     "NVIDIA H100": 3350.0,
     "NVIDIA H200": 4800.0,
     "NVIDIA L40": 864.0,
+    # Measured achieved DtoD on dellpromax 2026-06-27 (1467 GB/s, MBU 0.82 of the
+    # 1792 GB/s GDDR7 datasheet peak) — a better fallback than peak for the
+    # bandwidth-bound decode estimate. The live bench (§4) overrides per-node.
+    # Keyed by the family name; _lookup_chip_table prefix-matches the full
+    # "NVIDIA RTX PRO 6000 Blackwell Workstation Edition" nvidia-smi reports.
+    "NVIDIA RTX PRO 6000": 1467.0,
     "Apple M4 Max": 546.0,
     "Apple M3 Ultra": 819.0,
 }
+
+
+def _lookup_chip_table(table: dict[str, float], chip: str) -> float | None:
+    """Per-chip constant tolerant of the marketing suffix nvidia-smi appends.
+
+    nvidia-smi reports the full name (e.g. "NVIDIA RTX PRO 6000 Blackwell
+    Workstation Edition") while the tables are keyed by the family name
+    ("NVIDIA RTX PRO 6000"). Exact match first, then the LONGEST table key that
+    is a prefix of the reported chip — so one family row covers the Max-Q /
+    Server / Workstation variants without a brittle row per SKU. Returns None
+    when nothing matches (caller then falls back further).
+    """
+    if chip in table:
+        return table[chip]
+    best_key: str | None = None
+    for key in table:
+        if chip.startswith(key) and (best_key is None or len(key) > len(best_key)):
+            best_key = key
+    return table[best_key] if best_key is not None else None
 
 
 def _run(cmd: list[str], timeout: float = 4.0) -> str:
@@ -333,17 +358,166 @@ def _detect_node_id(warnings: list[str]) -> str:
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+# Effective-bandwidth micro-bench (§4) — measure, don't guess
+# ---------------------------------------------------------------------------
+
+# The bench drives libcuda directly (no torch dependency) and is GUARDED so it
+# can never OOM a co-resident serve (the GB10 failure mode): it copies between
+# two 2 GiB buffers and only runs if the GPU has comfortable free memory on top
+# of them. Wall-clock boxed; never raises.
+_BENCH_BUF_BYTES = 1 << 31          # 2 GiB working buffer (×2 for src + dst)
+_BENCH_MIN_FREE_HEADROOM = 4 << 30  # require this much free BEYOND the buffers
+_BENCH_MAX_SECONDS = 3.0
+
+
+def _measure_memory_bandwidth_gbs(warnings: list[str]) -> float | None:
+    """Measured device memory bandwidth (GB/s) via a libcuda DtoD copy, or None.
+
+    Returns None — caller keeps the datasheet table value, tagged "guessed" —
+    when this isn't an NVIDIA/CUDA box, libcuda is missing, the GPU lacks
+    comfortable free memory (so we NEVER OOM a resident model), or any driver
+    error occurs. Never raises; wall-clock boxed at _BENCH_MAX_SECONDS.
+    """
+    import ctypes
+    import sys
+    import time
+
+    # Linux/Spark soname vs the Windows CUDA driver DLL. A non-CUDA box (Mac,
+    # AMD-only, CPU) raises OSError on both → None (caller keeps the table value).
+    cu = None
+    for _libname in (["nvcuda"] if sys.platform == "win32" else ["libcuda.so.1"]):
+        try:
+            cu = ctypes.CDLL(_libname)
+            break
+        except OSError:
+            continue
+    if cu is None:
+        return None
+    vp = ctypes.c_void_p
+    ull = ctypes.c_ulonglong
+    ctx = vp()
+    a = ull()
+    b = ull()
+    e0 = vp()
+    e1 = vp()
+    ctx_made = False
+    try:
+        # Full argtypes — a by-value 64-bit handle/size passed without argtypes
+        # would default to c_int and truncate. All return codes are checked
+        # below; an unchecked NULL event handle would SIGSEGV past this try.
+        cu.cuInit.argtypes = [ctypes.c_uint]
+        cu.cuDeviceGet.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        cu.cuCtxCreate_v2.argtypes = [ctypes.POINTER(vp), ctypes.c_uint, ctypes.c_int]
+        cu.cuCtxDestroy_v2.argtypes = [vp]
+        cu.cuCtxSynchronize.argtypes = []
+        cu.cuMemGetInfo_v2.argtypes = [ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
+        cu.cuMemAlloc_v2.argtypes = [ctypes.POINTER(ull), ctypes.c_size_t]
+        cu.cuMemFree_v2.argtypes = [ull]
+        cu.cuMemsetD8_v2.argtypes = [ull, ctypes.c_ubyte, ctypes.c_size_t]
+        cu.cuMemcpyDtoD_v2.argtypes = [ull, ull, ctypes.c_size_t]
+        cu.cuEventCreate.argtypes = [ctypes.POINTER(vp), ctypes.c_uint]
+        cu.cuEventDestroy_v2.argtypes = [vp]
+        cu.cuEventRecord.argtypes = [vp, vp]
+        cu.cuEventSynchronize.argtypes = [vp]
+        cu.cuEventElapsedTime.argtypes = [ctypes.POINTER(ctypes.c_float), vp, vp]
+
+        if cu.cuInit(0) != 0:
+            return None
+        dev = ctypes.c_int()
+        if cu.cuDeviceGet(ctypes.byref(dev), 0) != 0:
+            return None
+        # A fresh floating context is safe HERE: serve bring-up runs this BEFORE
+        # any model loads, and the vLLM/llama.cpp backends run in separate
+        # processes (Popen) with their own contexts — so we never race a torch
+        # primary-ctx init in this process (the cuCtxCreate-before-torch driver
+        # bug). An in-process GPU user would instead need cuDevicePrimaryCtxRetain.
+        if cu.cuCtxCreate_v2(ctypes.byref(ctx), 0, dev) != 0:
+            return None
+        ctx_made = True
+
+        free = ctypes.c_size_t()
+        total = ctypes.c_size_t()
+        if cu.cuMemGetInfo_v2(ctypes.byref(free), ctypes.byref(total)) != 0:
+            return None
+        need = 2 * _BENCH_BUF_BYTES + _BENCH_MIN_FREE_HEADROOM  # buffers + headroom
+        if free.value < need:
+            warnings.append(
+                f"bandwidth bench skipped: GPU free {free.value >> 30}GB "
+                f"< {need >> 30}GB needed; keeping table value (guessed)"
+            )
+            return None
+
+        n = _BENCH_BUF_BYTES
+        if cu.cuMemAlloc_v2(ctypes.byref(a), n) != 0:
+            return None
+        if cu.cuMemAlloc_v2(ctypes.byref(b), n) != 0:
+            return None
+        if cu.cuEventCreate(ctypes.byref(e0), 0) != 0:  # NULL handle → SIGSEGV if unchecked
+            return None
+        if cu.cuEventCreate(ctypes.byref(e1), 0) != 0:
+            return None
+
+        cu.cuMemsetD8_v2(a, 1, n)
+        deadline = time.monotonic() + _BENCH_MAX_SECONDS  # box INCLUDES warmup
+        for _ in range(3):  # warmup
+            if cu.cuMemcpyDtoD_v2(b, a, n) != 0:
+                return None
+        if cu.cuCtxSynchronize() != 0:
+            return None
+
+        best_ms: float | None = None
+        ms = ctypes.c_float()
+        iters = 0
+        while time.monotonic() < deadline and iters < 50:
+            cu.cuEventRecord(e0, None)
+            if cu.cuMemcpyDtoD_v2(b, a, n) != 0:
+                break  # a failed copy would record a bogus time → fall to None
+            cu.cuEventRecord(e1, None)
+            if cu.cuEventSynchronize(e1) != 0:
+                break
+            cu.cuEventElapsedTime(ctypes.byref(ms), e0, e1)
+            if best_ms is None or ms.value < best_ms:
+                best_ms = ms.value
+            iters += 1
+        if not best_ms or best_ms <= 0:
+            return None
+        return round(2.0 * n / (best_ms / 1e3) / 1e9, 1)  # DtoD = read + write
+    except Exception as exc:  # noqa: BLE001 — a probe bench must never break bring-up
+        warnings.append(f"bandwidth bench errored ({type(exc).__name__}); keeping table value")
+        return None
+    finally:
+        # Release everything on every path (incl. early returns). Guard on the
+        # handle value so an un-acquired resource is never double-freed.
+        if a.value:
+            cu.cuMemFree_v2(a)
+        if b.value:
+            cu.cuMemFree_v2(b)
+        if e0.value:
+            cu.cuEventDestroy_v2(e0)
+        if e1.value:
+            cu.cuEventDestroy_v2(e1)
+        if ctx_made:
+            cu.cuCtxDestroy_v2(ctx)
+
+
+# ---------------------------------------------------------------------------
 
 
 def probe_node(
     friendly_name: str | None = None,
     master_url: str | None = None,
+    measure_bandwidth: bool = False,
 ) -> NodeProbe:
     """Probe the local machine and return a NodeProbe.
 
     `master_url` is reserved for bandwidth/RTT probing in v0.0.2 — v0.0.1
     just records None and lets the registry trigger active probes via
     `POST /mesh/v1/probe-network`.
+
+    `measure_bandwidth=True` runs a guarded micro-bench to set
+    `memory_bandwidth_gbs` from a real measurement (`bw_source="measured"`)
+    instead of the datasheet table (`"guessed"`). Off by default so the ~60s
+    heartbeat path never benches; bring-up (serve) opts in.
     """
     warnings: list[str] = []
 
@@ -377,12 +551,22 @@ def probe_node(
             )
 
     chip_key = chip.strip()
-    fp4 = _FP4_TOPS_BY_CHIP.get(chip_key)
-    fp16 = _FP16_TOPS_BY_CHIP.get(chip_key)
-    bw = _MEMORY_BANDWIDTH_GBS.get(chip_key)
+    fp4 = _lookup_chip_table(_FP4_TOPS_BY_CHIP, chip_key)
+    fp16 = _lookup_chip_table(_FP16_TOPS_BY_CHIP, chip_key)
+
+    # Bandwidth: a live measurement when asked and possible, else the datasheet
+    # table (tagged "guessed"), else None. The bench self-skips on non-CUDA
+    # boxes and when GPU memory is tight, so it's safe to opt in at bring-up.
+    bw = _lookup_chip_table(_MEMORY_BANDWIDTH_GBS, chip_key)
+    bw_source: str | None = "guessed" if bw is not None else None
+    if measure_bandwidth:
+        measured = _measure_memory_bandwidth_gbs(warnings)
+        if measured is not None:
+            bw, bw_source = measured, "measured"
     if bw is None:
         warnings.append(
-            f"no memory_bandwidth table entry for {chip_key!r}; allocator falls back to estimated_tps_at"
+            f"no memory_bandwidth for {chip_key!r} (table miss, bench unavailable); "
+            f"allocator falls back to estimated_tps_at"
         )
 
     return NodeProbe(
@@ -400,6 +584,7 @@ def probe_node(
         vram_available_gb=round(vram_avail, 2) if vram_avail else None,
         unified_memory=unified,
         memory_bandwidth_gbs=bw,
+        bw_source=bw_source,  # type: ignore[arg-type]
         public_ipv4=_detect_public_ipv4(),
         lan_interfaces=_detect_lan_interfaces(),
         bandwidth_to_master_mbps=None,
@@ -416,9 +601,17 @@ def main() -> None:
     ap.add_argument("--friendly-name", default=None)
     ap.add_argument("--json", action="store_true", help="Emit JSON (default).")
     ap.add_argument("--pretty", action="store_true", help="Pretty-print JSON.")
+    ap.add_argument(
+        "--measure-bandwidth",
+        action="store_true",
+        help="Run the guarded memory-bandwidth micro-bench (sets bw_source=measured). "
+        "Skips safely if the GPU is busy or non-CUDA.",
+    )
     args = ap.parse_args()
 
-    probe = probe_node(friendly_name=args.friendly_name)
+    probe = probe_node(
+        friendly_name=args.friendly_name, measure_bandwidth=args.measure_bandwidth
+    )
     data = probe.model_dump(mode="json")
     indent = 2 if args.pretty else None
     print(json.dumps(data, indent=indent, default=str))

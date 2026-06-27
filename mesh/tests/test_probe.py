@@ -12,7 +12,15 @@ import json
 
 import mesh.probe as probe_mod
 from mesh.models import NodeProbe
-from mesh.probe import _detect_amd_gpu, _detect_memory_gb, probe_node
+from mesh.probe import (
+    _FP4_TOPS_BY_CHIP,
+    _MEMORY_BANDWIDTH_GBS,
+    _detect_amd_gpu,
+    _detect_memory_gb,
+    _lookup_chip_table,
+    _measure_memory_bandwidth_gbs,
+    probe_node,
+)
 
 
 def test_detect_memory_is_positive_cross_os():
@@ -108,3 +116,61 @@ def test_probe_node_surfaces_amd_gpu_on_windows(monkeypatch):
     assert p.gpu_vendor == "amd"
     assert p.chip == "AMD Radeon RX 7900 XTX"
     assert p.cuda_capability is None  # do NOT fake a cuda_capability for AMD
+
+
+# ---------------------------------------------------------------------------
+# Bandwidth table lookup (§2 name-match fix) + guarded micro-bench (§4)
+# ---------------------------------------------------------------------------
+
+_RTX_PRO_6000_FULL = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
+
+
+def test_lookup_exact_match():
+    assert _lookup_chip_table(_MEMORY_BANDWIDTH_GBS, "NVIDIA GB10") == 273.0
+
+
+def test_lookup_prefix_match_rtx_pro_6000():
+    # nvidia-smi reports the full marketing name; the table is keyed by family.
+    # Before the prefix fix this returned None for BOTH bandwidth and fp4 tops.
+    assert _lookup_chip_table(_MEMORY_BANDWIDTH_GBS, _RTX_PRO_6000_FULL) == 1467.0
+    assert _lookup_chip_table(_FP4_TOPS_BY_CHIP, _RTX_PRO_6000_FULL) == 4000.0
+
+
+def test_lookup_longest_prefix_wins():
+    table = {"NVIDIA A": 1.0, "NVIDIA A100": 2.0}
+    assert _lookup_chip_table(table, "NVIDIA A100 80GB") == 2.0
+
+
+def test_lookup_no_match_returns_none():
+    assert _lookup_chip_table(_MEMORY_BANDWIDTH_GBS, "Totally Unknown Chip") is None
+
+
+def test_measure_bandwidth_never_raises():
+    # No libcuda (CI / Mac) → None; a CUDA box → positive float. Never raises,
+    # never blocks past the wall-clock box, never OOMs (free-mem guarded).
+    result = _measure_memory_bandwidth_gbs([])
+    assert result is None or (isinstance(result, float) and result > 0)
+
+
+def test_bw_source_guessed_from_table(monkeypatch):
+    monkeypatch.setattr(probe_mod, "_detect_chip", lambda w: _RTX_PRO_6000_FULL)
+    p = probe_node(measure_bandwidth=False)
+    assert p.memory_bandwidth_gbs == 1467.0
+    assert p.bw_source == "guessed"
+
+
+def test_bw_source_measured_when_bench_runs(monkeypatch):
+    monkeypatch.setattr(probe_mod, "_detect_chip", lambda w: _RTX_PRO_6000_FULL)
+    monkeypatch.setattr(probe_mod, "_measure_memory_bandwidth_gbs", lambda w: 1500.0)
+    p = probe_node(measure_bandwidth=True)
+    assert p.memory_bandwidth_gbs == 1500.0
+    assert p.bw_source == "measured"
+
+
+def test_bw_source_falls_back_to_table_when_bench_skips(monkeypatch):
+    # Bench returns None (busy GPU / non-CUDA) → keep the table value, "guessed".
+    monkeypatch.setattr(probe_mod, "_detect_chip", lambda w: _RTX_PRO_6000_FULL)
+    monkeypatch.setattr(probe_mod, "_measure_memory_bandwidth_gbs", lambda w: None)
+    p = probe_node(measure_bandwidth=True)
+    assert p.memory_bandwidth_gbs == 1467.0
+    assert p.bw_source == "guessed"
