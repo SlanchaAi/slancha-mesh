@@ -23,6 +23,11 @@ min_vram_gb = 7.0
 context_window = 8192
 n_layers = 42
 hidden_size = 3584
+# KV note: gemma-2 interleaves a 4096 sliding window on half its layers; modelled
+# here as full GQA, which slightly OVER-counts KV -> conservative tps underestimate.
+n_kv_heads = 8
+head_dim = 256
+kv_arch = "gqa"
 supports_lora_finetune = false
 upstream_model_card = "google/gemma-2-9b-it"
 coverage_tier = 2
