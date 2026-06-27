@@ -56,15 +56,64 @@ def _effective_vram_gb(node: NodeProbe) -> float:
     return max(0.0, node.ram_available_gb - 4.0)
 
 
+# Representative decode context for the OFFLINE allocator's tok/s estimate.
+# Decode is bandwidth-bound and the bytes/token grow with context (KV term,
+# §3.1), but the allocator has no per-request ctx at placement time. Until the
+# live router surfaces prompt length (brief §0 Step 0), score placement against
+# a typical agent context. Tunable.
+REPRESENTATIVE_CTX_TOKENS: int = 8192
+
+
+def _kv_bytes_per_token(spec: SpecialistCard) -> float:
+    """KV-cache bytes read per generated token (brief §3.1).
+
+    Standard attention: ``2 (K+V) · n_layers · n_kv_heads · head_dim · dtype``.
+    GQA/MQA fall out of this with small ``n_kv_heads``; MHA is the
+    ``n_kv_heads == n_heads`` case — a card with full geometry gets the exact term.
+
+    Returns 0.0 (→ caller uses a weights-only estimate) when the card has no KV
+    geometry, OR for ``mla`` (compressed-latent) / ``sliding_window`` (capped
+    cache), which we don't model yet. For those two the real KV is SMALL but
+    non-zero, so weights-only is mildly OPTIMISTIC for them — not an upper bound.
+    """
+    if spec.kv_arch in (None, "mla", "sliding_window"):
+        return 0.0
+    if spec.n_kv_heads is None or spec.head_dim is None:
+        return 0.0
+    dtype_bytes = spec.kv_dtype_bytes if spec.kv_dtype_bytes is not None else 2.0
+    return 2.0 * spec.n_layers * spec.n_kv_heads * spec.head_dim * dtype_bytes
+
+
+def _decode_bytes_gb(spec: SpecialistCard, ctx_tokens: int) -> float:
+    """Bytes (GB) moved per decoded token: resident weights + KV·ctx (§3.1).
+
+    Weights-only (today's behaviour) when the card carries no KV geometry, so
+    populating the KV fields is the only thing that changes a card's estimate.
+    Both terms are SI GB (÷1e9).
+
+    NOTE (MoE, §3.6): ``runtime_gb`` is the TOTAL resident size; an MoE card
+    (e.g. qwen3-coder-30b-a3b) reads only its ACTIVE experts per token, so this
+    over-states the weight bytes — and a KV term on top compounds the pessimism.
+    Before populating KV fields for an MoE card, give it an active-weight term.
+    """
+    kv_gb = _kv_bytes_per_token(spec) * ctx_tokens / 1e9
+    return max(spec.runtime_gb, 0.1) + kv_gb
+
+
 def _estimated_tps(spec: SpecialistCard, node: NodeProbe) -> float:
     """Decode tok/s estimate.
 
-    Primary: `node.memory_bandwidth_gbs / spec.runtime_gb` (per spec §3.1).
-    Fallback: `spec.estimated_tps_at[<chip_family>]` for chips that don't
-    expose memory bandwidth (GB10 today).
+    Primary: ``node.memory_bandwidth_gbs / bytes_per_token`` where
+    bytes/token = weights + KV·ctx (brief §3.1); reduces to weights-only when
+    the card lacks KV geometry. Fallback: ``spec.estimated_tps_at[<chip>]`` for
+    chips that don't expose memory bandwidth (GB10 today).
     """
     if node.memory_bandwidth_gbs:
-        return max(1.0, node.memory_bandwidth_gbs / max(spec.runtime_gb, 0.1))
+        # Clamp the representative ctx to the card's own window so a short-context
+        # model isn't scored against more KV than it can hold.
+        ctx = min(REPRESENTATIVE_CTX_TOKENS, spec.context_window)
+        bytes_gb = _decode_bytes_gb(spec, ctx)
+        return max(1.0, node.memory_bandwidth_gbs / bytes_gb)
     # Map chip → catalog key
     chip = node.chip.lower()
     if "gb10" in chip:
