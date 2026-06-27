@@ -18,6 +18,14 @@ min_vram_gb = 30.0
 context_window = 8192
 n_layers = 48
 hidden_size = 2048
+# KV geometry (GQA, per Qwen3-Coder-30B-A3B config: 4 KV heads, head_dim 128)
+n_kv_heads = 4
+head_dim = 128
+kv_arch = "gqa"
+# MoE decode roofline reads only the ACTIVE params per token: 3.3B activated @
+# FP8 (1 byte) ~= 3.3 GB/token. (runtime_gb=70 is the vLLM KV+weights memory
+# RESERVATION at util=0.55, not the per-token read — total weights are ~30GB.)
+active_params_gb = 3.3
 supports_lora_finetune = false
 upstream_model_card = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 coverage_tier = 1

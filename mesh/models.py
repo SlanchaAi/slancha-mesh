@@ -134,12 +134,20 @@ class SpecialistCard(_Frozen):
     # latent, DeepSeek V2/V3) and sliding_window are NOT modelled yet — they
     # fall back to weights-only (real KV is small but non-zero, so the estimate
     # is mildly optimistic for them). Their sizing fields land with the step
-    # that implements their formulas; likewise the §3.5 down-quant ladder and
-    # MoE active-param weight term are deferred to their consuming steps.
+    # that implements their formulas; likewise the §3.5 down-quant ladder is
+    # deferred to its consuming step.
     n_kv_heads: int | None = Field(default=None, gt=0)
     head_dim: int | None = Field(default=None, gt=0)
     kv_dtype_bytes: float | None = Field(default=None, gt=0)  # bytes/elem; 2.0 (fp16) assumed when None
     kv_arch: Literal["mha", "gqa", "mqa", "mla", "sliding_window"] | None = None
+
+    # Bandwidth sizing (allocator §3.6) — MoE active-weight bytes. For a Mixture-
+    # of-Experts model the decode roofline reads only the ACTIVE params per token
+    # (active experts + shared attention/router), not the total resident weights,
+    # so set this to the activated-param size in GB at the served quant. The
+    # CAPACITY gate still uses total `runtime_gb`; only the decode estimate uses
+    # this. None = dense model (weight term is runtime_gb, today's behaviour).
+    active_params_gb: float | None = Field(default=None, gt=0)
 
     supports_lora_finetune: bool = False
     upstream_model_card: str | None = None

@@ -85,19 +85,18 @@ def _kv_bytes_per_token(spec: SpecialistCard) -> float:
 
 
 def _decode_bytes_gb(spec: SpecialistCard, ctx_tokens: int) -> float:
-    """Bytes (GB) moved per decoded token: resident weights + KV·ctx (§3.1).
+    """Bytes (GB) moved per decoded token: weights read + KV·ctx (§3.1, §3.6).
 
-    Weights-only (today's behaviour) when the card carries no KV geometry, so
-    populating the KV fields is the only thing that changes a card's estimate.
-    Both terms are SI GB (÷1e9).
-
-    NOTE (MoE, §3.6): ``runtime_gb`` is the TOTAL resident size; an MoE card
-    (e.g. qwen3-coder-30b-a3b) reads only its ACTIVE experts per token, so this
-    over-states the weight bytes — and a KV term on top compounds the pessimism.
-    Before populating KV fields for an MoE card, give it an active-weight term.
+    Weight term: ``active_params_gb`` when set (MoE — only the active experts +
+    shared params are read per token), else ``runtime_gb`` (dense). Using total
+    weights for an MoE badly under-estimates tok/s; using active params fixes the
+    "A3B MoE ranked slowest when it's among the fastest" mis-rank. Capacity/fit
+    still gates on total ``runtime_gb`` elsewhere — only the decode roofline uses
+    the active slice. KV term is 0 until the card has geometry. Both terms SI GB.
     """
+    weight_gb = spec.active_params_gb if spec.active_params_gb is not None else spec.runtime_gb
     kv_gb = _kv_bytes_per_token(spec) * ctx_tokens / 1e9
-    return max(spec.runtime_gb, 0.1) + kv_gb
+    return max(weight_gb, 0.1) + kv_gb
 
 
 def _estimated_tps(spec: SpecialistCard, node: NodeProbe) -> float:
