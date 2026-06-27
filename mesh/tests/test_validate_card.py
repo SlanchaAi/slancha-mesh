@@ -98,6 +98,24 @@ def test_quality_router_observed_hardcoded_errors(tmp_path):
     assert report.has_errors
 
 
+def test_kv_arch_without_geometry_warns(tmp_path):
+    """A standard-attention card missing n_kv_heads/head_dim warns (not errors)."""
+    bad = _GOOD_TOML.format(stem="kv") + 'kv_arch = "gqa"\n'
+    f = _write(tmp_path / "kv.toml", bad)
+    report = validate_paths([f])
+    assert any(x.code == "KV_GEOMETRY_INCOMPLETE" for x in report.findings)
+    assert not report.has_errors
+
+
+def test_kv_arch_with_full_geometry_clean(tmp_path):
+    good = _GOOD_TOML.format(stem="kv-ok") + (
+        'kv_arch = "gqa"\nn_kv_heads = 8\nhead_dim = 128\n'
+    )
+    f = _write(tmp_path / "kv-ok.toml", good)
+    report = validate_paths([f])
+    assert not any(x.code == "KV_GEOMETRY_INCOMPLETE" for x in report.findings)
+
+
 def test_pydantic_validation_error_surfaces(tmp_path):
     """Missing required field → Pydantic validation error → reported."""
     bad = _GOOD_TOML.format(stem="missing").replace(

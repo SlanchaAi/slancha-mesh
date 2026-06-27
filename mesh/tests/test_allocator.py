@@ -13,6 +13,10 @@ import math
 import pytest
 
 from mesh.allocator import (
+    REPRESENTATIVE_CTX_TOKENS,
+    _decode_bytes_gb,
+    _estimated_tps,
+    _kv_bytes_per_token,
     allocate_cluster,
     model_fit_score,
 )
@@ -266,3 +270,114 @@ def test_fit_score_synthetic_combos(spec_id, node_fix, expected_finite, request,
         assert math.isfinite(score)
     else:
         assert score == -math.inf
+
+
+# ---------------------------------------------------------------------------
+# Decode bytes-per-token model — brief §3.1 (KV-aware tps estimate)
+# ---------------------------------------------------------------------------
+
+
+def _kv_card(**over) -> SpecialistCard:
+    base = dict(
+        model_id="m",
+        specialist_id="s",
+        domain="general",
+        difficulty_tiers=["easy"],
+        required_backend="vllm",
+        storage_gb=4.0,
+        runtime_gb=8.0,
+        min_vram_gb=8.0,
+        context_window=131072,
+        n_layers=32,
+    )
+    base.update(over)
+    return SpecialistCard(**base)
+
+
+def _bw_node(memory_bandwidth_gbs: float | None) -> NodeProbe:
+    return NodeProbe(
+        node_id="n",
+        friendly_name="n",
+        chip="NVIDIA RTX PRO 6000",
+        arch="x86_64",
+        ram_total_gb=128.0,
+        ram_available_gb=120.0,
+        memory_bandwidth_gbs=memory_bandwidth_gbs,
+    )
+
+
+def test_kv_bytes_per_token_gqa_formula():
+    # Llama-3.1-8B-shaped GQA: 2·32·8·128·2 = 131072 bytes/token.
+    card = _kv_card(n_kv_heads=8, head_dim=128, kv_dtype_bytes=2.0, kv_arch="gqa")
+    assert _kv_bytes_per_token(card) == 2 * 32 * 8 * 128 * 2
+
+
+def test_kv_bytes_zero_without_geometry():
+    # No KV fields → 0 → weights-only fallback (today's behaviour).
+    assert _kv_bytes_per_token(_kv_card()) == 0.0
+
+
+def test_kv_bytes_zero_for_unmodelled_arch():
+    # mla / sliding_window aren't modelled by the standard formula yet —
+    # weights-only, never wrong-high.
+    assert _kv_bytes_per_token(_kv_card(kv_arch="mla", n_kv_heads=8, head_dim=128)) == 0.0
+    assert (
+        _kv_bytes_per_token(_kv_card(kv_arch="sliding_window", n_kv_heads=8, head_dim=128))
+        == 0.0
+    )
+
+
+def test_kv_dtype_fp8_halves_bytes():
+    fp16 = _kv_card(n_kv_heads=8, head_dim=128, kv_dtype_bytes=2.0, kv_arch="gqa")
+    fp8 = _kv_card(n_kv_heads=8, head_dim=128, kv_dtype_bytes=1.0, kv_arch="gqa")
+    assert _kv_bytes_per_token(fp8) == _kv_bytes_per_token(fp16) / 2
+
+
+def test_decode_bytes_weights_only_when_no_kv():
+    assert _decode_bytes_gb(_kv_card(runtime_gb=7.2), 8192) == pytest.approx(7.2)
+
+
+def test_decode_bytes_kv_rivals_weights_at_long_context():
+    # GQA card at 128k: KV term should rival the 7.2 GB of weights (the
+    # regression the KV term fixes — weights-only is ~2x optimistic).
+    card = _kv_card(runtime_gb=7.2, n_kv_heads=8, head_dim=128, kv_arch="gqa")
+    b_short = _decode_bytes_gb(card, 8192)
+    b_long = _decode_bytes_gb(card, 131072)
+    assert b_short > 7.2
+    assert b_long > b_short
+    assert (b_long - 7.2) > 7.2  # KV at full ctx exceeds the weight bytes
+
+
+def test_estimated_tps_unchanged_without_kv_fields():
+    # Non-regression guarantee: a card with no KV geometry estimates exactly
+    # the pre-KV weights-only tok/s.
+    node = _bw_node(1467.0)
+    card = _kv_card(runtime_gb=8.0)
+    assert _estimated_tps(card, node) == pytest.approx(max(1.0, 1467.0 / 8.0))
+
+
+def test_estimated_tps_lower_with_kv_geometry():
+    node = _bw_node(1467.0)
+    plain = _kv_card(runtime_gb=8.0)
+    withkv = _kv_card(runtime_gb=8.0, n_kv_heads=8, head_dim=128, kv_arch="gqa")
+    assert _estimated_tps(withkv, node) < _estimated_tps(plain, node)
+
+
+def test_representative_ctx_in_plausible_range():
+    # The offline allocator scores against a typical agent context, not a
+    # degenerate 1-token or an unrealistically huge window.
+    assert 1024 <= REPRESENTATIVE_CTX_TOKENS <= 32768
+
+
+def test_estimated_tps_clamps_ctx_to_card_window():
+    # A short-context card must not be scored against more KV than it holds:
+    # ctx is clamped to context_window, so a 2k-window GQA card uses 2k, not 8k.
+    node = _bw_node(1467.0)
+    small_win = _kv_card(
+        runtime_gb=8.0, context_window=2048, n_kv_heads=8, head_dim=128, kv_arch="gqa"
+    )
+    expected_ctx = min(REPRESENTATIVE_CTX_TOKENS, 2048)
+    expected_bytes = _decode_bytes_gb(small_win, expected_ctx)
+    assert _estimated_tps(small_win, node) == pytest.approx(
+        max(1.0, 1467.0 / expected_bytes)
+    )

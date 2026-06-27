@@ -182,6 +182,25 @@ def _check_quality_consistency(card: SpecialistCard, path: Path, report: _Report
         )
 
 
+def _check_kv_geometry(card: SpecialistCard, path: Path, report: _Report) -> None:
+    """KV geometry must be complete for the allocator decode bytes model (§3.1).
+
+    A standard-attention card (mha/gqa/mqa) needs both n_kv_heads and head_dim,
+    or the allocator silently falls back to a weights-only tok/s estimate that
+    loses the long-context KV term.
+    """
+    if card.kv_arch in ("mha", "gqa", "mqa") and (
+        card.n_kv_heads is None or card.head_dim is None
+    ):
+        report.warning(
+            path,
+            "KV_GEOMETRY_INCOMPLETE",
+            f"kv_arch={card.kv_arch!r} but n_kv_heads/head_dim missing; the "
+            f"allocator decode estimate falls back to weights-only (loses the "
+            f"long-context KV term)",
+        )
+
+
 def _check_one(path: Path) -> tuple[SpecialistCard | None, _Report]:
     """Validate a single TOML. Returns (card_or_None, findings)."""
     report = _Report()
@@ -218,6 +237,7 @@ def _check_one(path: Path) -> tuple[SpecialistCard | None, _Report]:
     _check_languages(card, path, report)
     _check_specialist_id_matches_filename(card, path, report)
     _check_quality_consistency(card, path, report)
+    _check_kv_geometry(card, path, report)
 
     return card, report
 

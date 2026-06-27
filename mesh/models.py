@@ -117,6 +117,25 @@ class SpecialistCard(_Frozen):
     hidden_size: int | None = None
 
     estimated_tps_at: dict[str, float] = Field(default_factory=dict)
+
+    # Bandwidth sizing (allocator §3.1) — KV-cache geometry for the decode
+    # bytes-per-token model. All optional and sourced from the model's HF
+    # config (num_key_value_heads, head_dim, ...). When absent the allocator
+    # falls back to a weights-only byte estimate — i.e. today's behaviour, so
+    # an un-populated card is exactly as accurate (or inaccurate) as before.
+    #   kv_bytes/token = 2(K+V) · n_layers · n_kv_heads · head_dim · kv_dtype_bytes
+    # kv_arch selects the per-token KV formula; mha/gqa/mqa use the expression
+    # above (mqa => n_kv_heads=1, mha => n_kv_heads=n_heads). mla (compressed
+    # latent, DeepSeek V2/V3) and sliding_window are NOT modelled yet — they
+    # fall back to weights-only (real KV is small but non-zero, so the estimate
+    # is mildly optimistic for them). Their sizing fields land with the step
+    # that implements their formulas; likewise the §3.5 down-quant ladder and
+    # MoE active-param weight term are deferred to their consuming steps.
+    n_kv_heads: int | None = Field(default=None, gt=0)
+    head_dim: int | None = Field(default=None, gt=0)
+    kv_dtype_bytes: float | None = Field(default=None, gt=0)  # bytes/elem; 2.0 (fp16) assumed when None
+    kv_arch: Literal["mha", "gqa", "mqa", "mla", "sliding_window"] | None = None
+
     supports_lora_finetune: bool = False
     upstream_model_card: str | None = None
 
